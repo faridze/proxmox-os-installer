@@ -36,6 +36,7 @@ def _make_package(root: Path, version: str = "9.9.9-test") -> None:
         "common.sh",
         "interactive.sh",
         "install_aliases.sh",
+        "snippets_guidance.sh",
     ):
         shutil_copy(BASE / f"lib/{name}", root / f"lib/{name}")
     (root / "install.sh").write_bytes((BASE / "install.sh").read_bytes())

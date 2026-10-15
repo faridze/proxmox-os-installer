@@ -23,7 +23,7 @@ if [[ "${PVEOSI_SKIP_FILE_COPY:-0}" != 1 ]]; then
   for py in image_catalog.py preflight.py cache_ops.py ssh_access.py update_engine.py; do
     install -m 0644 "$REPO/lib/$py" "$TARGET/lib/$py"
   done
-  for sh in common.sh interactive.sh install_aliases.sh; do
+  for sh in common.sh interactive.sh install_aliases.sh snippets_guidance.sh; do
     install -m 0644 "$REPO/lib/$sh" "$TARGET/lib/$sh"
   done
   install -m 0644 "$REPO/VERSION" "$TARGET/VERSION"

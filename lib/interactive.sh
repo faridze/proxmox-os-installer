@@ -49,6 +49,40 @@ pick_bridge() {
   python3 "$PREFLIGHT" bridge-exists "$BRIDGE" || error "Bridge $BRIDGE not found."
 }
 
+configure_ssh_password_login() {
+  pveosi_require_snippet_storage "${CREATED:-0}"
+  if [[ "$USERNAME" != root ]]; then
+    if ask_yes 'Use root instead of the chosen user for SSH password login (changes cloud-init account)' n; then
+      USERNAME=root
+    fi
+  fi
+  if [[ "$USERNAME" == root ]]; then
+    if ask_yes 'Allow direct root SSH login with password (higher security risk)' n; then
+      ROOT_PASSWORD_LOGIN=1
+      SSH_PASSWORD_LOGIN=1
+    else
+      printf 'Direct root password SSH was not enabled. Console password remains available.\n'
+      SSH_PASSWORD_LOGIN=0
+      return 0
+    fi
+  else
+    SSH_PASSWORD_LOGIN=1
+  fi
+  pick_snippet_storage
+}
+
+collect_password_interactive() {
+  read -rsp 'Login password: ' PASSWORD || error 'Input cancelled.'
+  printf '\n'
+  [[ -n "$PASSWORD" ]] || error 'Password cannot be empty.'
+  read -rsp 'Confirm password: ' PASSWORD_CONFIRM || error 'Input cancelled.'
+  printf '\n'
+  [[ "$PASSWORD" == "$PASSWORD_CONFIRM" ]] || error 'Passwords do not match.'
+  unset PASSWORD_CONFIRM
+  printf 'Note: password may appear briefly in process listings while being applied; SSH keys are preferred.\n'
+  printf 'Note: many cloud images disable password-based SSH; console/VNC may still work.\n'
+}
+
 collect_auth() {
   USERNAME="$(ask 'Cloud-init username' "$DEFAULT_USER")"
   [[ "$USERNAME" =~ ^[a-z_][a-z0-9_-]{0,30}$ ]] || error 'Invalid username.'
@@ -72,47 +106,35 @@ collect_auth() {
   PASSWORD_SET=0
   SSH_PASSWORD_LOGIN=0
   ROOT_PASSWORD_LOGIN=0
-  if [[ -z "$SSH_PUBKEY" && "$SSH_INLINE_VALIDATED" == 0 ]] || ask_yes 'Also set console login password' n; then
+
+  local ssh_default=n
+  if [[ -z "$SSH_PUBKEY" && "$SSH_INLINE_VALIDATED" == 0 ]]; then ssh_default=y; fi
+  local want_ssh_pw=n
+  if ask_yes 'Enable SSH password login at FIRST BOOT (requires snippets storage)' "$ssh_default"; then
+    want_ssh_pw=y
+  fi
+  if [[ "$want_ssh_pw" == y ]]; then
+    configure_ssh_password_login
+  fi
+
+  if [[ -z "$SSH_PUBKEY" && "$SSH_INLINE_VALIDATED" == 0 ]]; then
     PASSWORD_SET=1
-    read -rsp 'Login password: ' PASSWORD || error 'Input cancelled.'
-    printf '\n'
-    [[ -n "$PASSWORD" ]] || error 'Password cannot be empty.'
-    read -rsp 'Confirm password: ' PASSWORD_CONFIRM || error 'Input cancelled.'
-    printf '\n'
-    [[ "$PASSWORD" == "$PASSWORD_CONFIRM" ]] || error 'Passwords do not match.'
-    unset PASSWORD_CONFIRM
-    printf 'Note: password may appear briefly in process listings while being applied; SSH keys are preferred.\n'
-    printf 'Note: many cloud images disable password-based SSH; console/VNC may still work.\n'
-    local ssh_default=n
-    if [[ -z "$SSH_PUBKEY" && "$SSH_INLINE_VALIDATED" == 0 ]]; then ssh_default=y; fi
-    if ask_yes 'Enable SSH password login at FIRST BOOT (requires snippets storage)' "$ssh_default"; then
-      SSH_PASSWORD_LOGIN=1
-      if [[ "$USERNAME" != root ]]; then
-        if ask_yes 'Use root instead of the chosen user for SSH password login (changes cloud-init account)' n; then
-          USERNAME=root
-        fi
-      fi
-      if [[ "$USERNAME" == root ]]; then
-        if ask_yes 'Allow direct root SSH login with password (higher security risk)' n; then
-          ROOT_PASSWORD_LOGIN=1
-        else
-          printf 'Direct root password SSH was not enabled. Console password remains available.\n'
-          SSH_PASSWORD_LOGIN=0
-        fi
-      fi
-      if (( SSH_PASSWORD_LOGIN == 1 )); then
-        pick_snippet_storage
-      fi
-    fi
+    collect_password_interactive
+  elif (( SSH_PASSWORD_LOGIN == 1 )); then
+    PASSWORD_SET=1
+    collect_password_interactive
+  elif ask_yes 'Also set console login password' n; then
+    PASSWORD_SET=1
+    collect_password_interactive
   fi
 }
 
 pick_snippet_storage() {
   local -a candidates=()
   local entry default=""
-  mapfile -t candidates < <(pvesm status --content snippets 2>/dev/null | awk 'NR>1 && $3=="active" {print $1}')
+  mapfile -t candidates < <(pveosi_list_snippet_storages)
   if (( ${#candidates[@]} == 0 )); then
-    error 'Password SSH needs snippets storage. Enable snippets content on an active directory/NFS storage (Datacenter -> Storage), then rerun.'
+    pveosi_snippets_missing_error "${CREATED:-0}"
   fi
   printf 'Storages supporting Cloud-Init snippets: %s\n' "${candidates[*]}"
   default="${candidates[0]}"

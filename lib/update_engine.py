@@ -46,6 +46,7 @@ REQUIRED_SOURCE = (
     "lib/common.sh",
     "lib/interactive.sh",
     "lib/install_aliases.sh",
+    "lib/snippets_guidance.sh",
 )
 
 REQUIRED_INSTALLED = (
@@ -60,6 +61,7 @@ REQUIRED_INSTALLED = (
     "lib/common.sh",
     "lib/interactive.sh",
     "lib/install_aliases.sh",
+    "lib/snippets_guidance.sh",
 )
 
 PY_LIBS = (
@@ -69,7 +71,7 @@ PY_LIBS = (
     "ssh_access.py",
     "update_engine.py",
 )
-SH_LIBS = ("common.sh", "interactive.sh", "install_aliases.sh")
+SH_LIBS = ("common.sh", "interactive.sh", "install_aliases.sh", "snippets_guidance.sh")
 
 
 class UpdateError(Exception):

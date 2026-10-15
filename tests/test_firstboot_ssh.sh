@@ -96,9 +96,9 @@ inputs() {
   for _ in {1..5}; do printf '\n'; done
   for _ in {1..4}; do printf '\n'; done
   printf '\n\n'  # default user; no public SSH key
-  printf 'LOCAL_TEST_PASSWORD\nLOCAL_TEST_PASSWORD\n'
-  printf 'y\ny\ny\n' # password SSH; switch user to root; root SSH opt-in
+  printf 'y\ny\ny\n' # SSH password login; switch to root; allow root SSH
   printf '\n' # snippets storage: local
+  printf 'LOCAL_TEST_PASSWORD\nLOCAL_TEST_PASSWORD\n'
   printf 'y\nn\n' # create VM; do not start
 }
 inputs | "$REPO/bin/proxmox-os-installer" >"$TMP/console.log" 2>&1

@@ -1,5 +1,7 @@
 # shellcheck shell=bash
 # Shared shell helpers for proxmox-os-installer
+# shellcheck source=lib/snippets_guidance.sh
+source "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/snippets_guidance.sh"
 error() { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
 info() { printf '\n==> [%s] %s\n' "$STAGE_LABEL" "$*"; }
 stage() {

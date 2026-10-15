@@ -238,6 +238,7 @@ if (( SSH_PASSWORD_LOGIN == 1 )); then
   # qm cloudinit dump includes the Proxmox-generated user, keys and password.
   # Never print its output: it can contain password data.
   TMP_USER_DUMP="$(mktemp)"
+  chmod 0600 "$TMP_USER_DUMP"
   if ! qm cloudinit dump "$VMID" user >"$TMP_USER_DUMP" 2>/dev/null; then
     provisioning_failed 'generate Proxmox user-data for password SSH'
   fi
@@ -247,7 +248,8 @@ if (( SSH_PASSWORD_LOGIN == 1 )); then
   python3 "$SSH_ACCESS" create "$TMP_USER_DUMP" "$SNIPPET_PATH" "$ACCESS_MODE" ||
     provisioning_failed 'prepare first-boot SSH user-data snippet'
   qm_run "attach password SSH cloud-init snippet for VM ${VMID}" set "$VMID" --cicustom "user=${SNIPPET_VOLID}"
-  printf 'First-boot SSH user-data: %s (keep this file for VM start/migration)\n' "$SNIPPET_VOLID"
+  printf 'Persistent Cloud-Init snippet: %s\n' "$SNIPPET_VOLID"
+  printf '%s\n' '(retained for VM start, cloud-init regeneration, and migration; not removed after first boot)'
 fi
 
 stage 'Final verification'
@@ -265,7 +267,15 @@ fi
 printf 'Inspect: qm config %s\n' "$VMID"
 printf '%s\n' 'Reminder: QEMU Guest Agent must be installed in the guest; enabling the VM option alone does not guarantee it works.'
 if (( SSH_PASSWORD_LOGIN == 1 )); then
-  printf '%s\n' 'Password SSH is configured for first boot; verify inside the guest after cloud-init completes.'
+  printf '%s\n' 'SSH password login configured for first boot.'
+  printf '%s\n' ''
+  printf '%s\n' 'Security:'
+  printf '%s\n' '- Cloud-Init Snippet is retained on the Proxmox host.'
+  printf '%s\n' '- The Snippet may contain a password hash.'
+  printf '%s\n' '- Do not delete the Snippet while attached to the VM.'
+  printf '%s\n' '- Restrict SSH access, especially when root password login is enabled.'
+  printf '%s\n' ''
+  printf '%s\n' 'Verify SSH inside the guest after cloud-init completes; success here does not prove login works.'
 else
   printf '%s\n' 'Reminder: cloud images may disable password-based SSH; SSH keys are preferred.'
 fi

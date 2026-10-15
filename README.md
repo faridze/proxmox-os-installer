@@ -162,4 +162,13 @@ This opt-in feature requires an active Proxmox storage supporting **snippets** (
 
 Cloud-Init normally applies first-boot user-data **once per instance**. This feature does not change SSH settings of an already booted VM; use its guest console/SSH access to adjust existing installations. Successful configuration does not guarantee guest-side success until verified after boot. `qm cloudinit dump VMID user` may show the Proxmox-generated config, not the attached custom snippet; inspect the snippet if necessary (it is root-only and may contain password hashes).
 
+**Persistent snippet lifecycle (not auto-deleted):**
+
+- The `pveosi-VMID-user.yaml` snippet is **kept on the Proxmox host** after first boot. The installer does **not** remove it automatically.
+- The file may contain a **password hash** copied from Proxmox-generated user-data (not the plaintext password). Treat it as sensitive (`0600`).
+- Proxmox may need the snippet for later cloud-init drive regeneration, VM start, and **migration**; the file must remain on the destination node.
+- Deleting the snippet while `cicustom` still references it can break VM startup until you reconfigure cloud-init safely.
+- Guests may also retain cloud-init data under `/var/lib/cloud` after first boot.
+- Plaintext passwords may still appear briefly in host process listings during `qm set --cipassword` (Proxmox behavior); SSH keys remain preferred.
+
 Proxmox `qm set --cipassword` may transiently expose the password in host process arguments. Restrict access to the node and prefer SSH keys. Full root-password SSH is not enabled by default.
