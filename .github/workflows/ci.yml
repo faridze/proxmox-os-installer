@@ -28,6 +28,8 @@ jobs:
         run: bash tests/test_update.sh
       - name: Snippets guidance regressions
         run: sudo bash tests/test_snippets_guidance.sh
+      - name: Finalize engine unit tests
+        run: python3 -m unittest tests.test_finalize_engine -v
       - name: Python unit tests
         run: python3 -m unittest discover -s tests -p 'test_*.py' -v
       - name: Dry-run mock (no VM created)

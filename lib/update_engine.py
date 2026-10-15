@@ -43,6 +43,7 @@ REQUIRED_SOURCE = (
     "lib/cache_ops.py",
     "lib/ssh_access.py",
     "lib/update_engine.py",
+    "lib/finalize_engine.py",
     "lib/common.sh",
     "lib/interactive.sh",
     "lib/install_aliases.sh",
@@ -58,6 +59,7 @@ REQUIRED_INSTALLED = (
     "lib/cache_ops.py",
     "lib/ssh_access.py",
     "lib/update_engine.py",
+    "lib/finalize_engine.py",
     "lib/common.sh",
     "lib/interactive.sh",
     "lib/install_aliases.sh",
@@ -70,6 +72,7 @@ PY_LIBS = (
     "cache_ops.py",
     "ssh_access.py",
     "update_engine.py",
+    "finalize_engine.py",
 )
 SH_LIBS = ("common.sh", "interactive.sh", "install_aliases.sh", "snippets_guidance.sh")
 

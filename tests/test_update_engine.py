@@ -33,6 +33,7 @@ def _make_package(root: Path, version: str = "9.9.9-test") -> None:
         "cache_ops.py",
         "ssh_access.py",
         "update_engine.py",
+        "finalize_engine.py",
         "common.sh",
         "interactive.sh",
         "install_aliases.sh",

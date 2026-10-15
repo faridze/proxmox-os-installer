@@ -20,7 +20,7 @@ if [[ "${PVEOSI_SKIP_FILE_COPY:-0}" != 1 ]]; then
   install -d -m 0755 "$TARGET"/{bin,catalog,lib} /usr/local/sbin
   install -m 0755 "$REPO/bin/proxmox-os-installer" "$PVEOSI_PROJECT_BIN"
   install -m 0644 "$REPO/catalog/os-images.tsv" "$TARGET/catalog/os-images.tsv"
-  for py in image_catalog.py preflight.py cache_ops.py ssh_access.py update_engine.py; do
+  for py in image_catalog.py preflight.py cache_ops.py ssh_access.py update_engine.py finalize_engine.py; do
     install -m 0644 "$REPO/lib/$py" "$TARGET/lib/$py"
   done
   for sh in common.sh interactive.sh install_aliases.sh snippets_guidance.sh; do

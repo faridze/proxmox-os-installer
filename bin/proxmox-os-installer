@@ -3,10 +3,11 @@
 set -Eeuo pipefail
 umask 077
 
-VERSION="0.2.3"
+VERSION="0.2.4"
 SELF="$(readlink -f -- "${BASH_SOURCE[0]}")"
 ROOT="$(cd -- "$(dirname -- "$SELF")/.." && pwd -P)"
 UPDATE_ENGINE="${ROOT}/lib/update_engine.py"
+FINALIZE_ENGINE="${ROOT}/lib/finalize_engine.py"
 CATALOG="${ROOT}/catalog/os-images.tsv"
 CHECKER="${ROOT}/lib/image_catalog.py"
 PREFLIGHT="${ROOT}/lib/preflight.py"
@@ -66,6 +67,9 @@ case "${1:-}" in
   update)
     exec python3 "$UPDATE_ENGINE" update "${@:2}"
     ;;
+  finalize)
+    exec python3 "$FINALIZE_ENGINE" finalize "${@:2}"
+    ;;
   --version) printf '%s\n' "$VERSION"; exit 0 ;;
   --list-os)
     python3 "$CHECKER" catalog-check "$CATALOG" >/dev/null || exit 1
@@ -85,7 +89,7 @@ case "${1:-}" in
     ;;
   --dry-run) DRY_RUN=1 ;;
   '') ;;
-  *) error 'Usage: proxmox-os-installer [update [--check|--ref REF|--yes]|--version|--list-os|--check-catalog|--check-upstream|--cache-list|--cache-prune|--dry-run]' ;;
+  *) error 'Usage: proxmox-os-installer [update|finalize <VMID> [--dry-run]|--version|--list-os|--check-catalog|--check-upstream|--cache-list|--cache-prune|--dry-run]' ;;
 esac
 
 (( EUID == 0 )) || error 'Run as root on a Proxmox VE node.'
@@ -254,6 +258,15 @@ fi
 
 stage 'Final verification'
 python3 "$PREFLIGHT" verify-vm "$VMID" >/dev/null || provisioning_failed "post-create verification"
+
+EXISTING_TAGS="$(qm config "$VMID" 2>/dev/null | sed -n 's/^tags: //p' | tr -d '"' || true)"
+if [[ "$EXISTING_TAGS" != *pveosi* ]]; then
+  if [[ -n "$EXISTING_TAGS" ]]; then
+    qm_run "record pveosi ownership tag for VM ${VMID}" set "$VMID" --tags "${EXISTING_TAGS},pveosi"
+  else
+    qm_run "record pveosi ownership tag for VM ${VMID}" set "$VMID" --tags pveosi
+  fi
+fi
 
 stage 'Optional VM startup'
 printf '\nSUCCESS: VM %s (%s) created.\n' "$VMID" "$OS_LABEL"

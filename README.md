@@ -2,7 +2,7 @@
 
 Fast interactive cloud-image VM provisioning for **Proxmox VE 8+ (x86_64)**. Build Debian, Ubuntu, AlmaLinux, or Rocky Linux VMs without running the ISO installer. Uses official upstream images, cloud-init, and Proxmox `qm` with any active image-capable storage (including `local-lvm`).
 
-> **Status: v0.2.3 (self-update + experimental first-boot SSH password support).** Offline mocked tests cover provisioning safety paths; **no supported OS has been fully boot-tested in CI** (CI never creates a real VM). Validate on a lab node using [docs/MANUAL_VALIDATION.md](docs/MANUAL_VALIDATION.md) before production use.
+> **Status: v0.2.4 (Cloud-Init SSH merge fix + optional finalize).** Offline mocked tests cover provisioning safety paths; **no supported OS has been fully boot-tested in CI** (CI never creates a real VM). Validate on a lab node using [docs/MANUAL_VALIDATION.md](docs/MANUAL_VALIDATION.md) before production use.
 
 ## Quick install from GitHub (on a Proxmox node, as root)
 
@@ -79,8 +79,20 @@ pveosi --cache-list                 # list checksum-verified cache files and usa
 pveosi --cache-prune                # preview obsolete cache entries; confirm before delete
 pveosi --version
 pveosi update [--check|--ref REF|--yes]
+pveosi finalize <VMID> [--dry-run]   # optional post-install Cloud-Init detach (VM must be stopped)
 # Equivalent: pve-osi … or proxmox-os-installer …
 ```
+
+### Optional Cloud-Init finalization
+
+After a successful first boot, operators may detach Proxmox Cloud-Init from a **stopped**, **pveosi-tagged** VM:
+
+```bash
+pveosi finalize <VMID> --dry-run
+pveosi finalize <VMID>
+```
+
+Guest preparation (disable cloud-init in the guest, reboot, verify access, shut down) is **operator-attested** — the host does not verify guest-agent state. Finalization removes Cloud-Init drives/settings from the Proxmox VM config only; it does not change passwords or SSH inside the guest. Snippet deletion is optional and only for matching `pveosi-VMID-user.yaml` files with no other references.
 
 ## Supported OS versions
 

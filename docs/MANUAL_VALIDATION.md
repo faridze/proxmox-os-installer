@@ -39,3 +39,32 @@ Only on a **fresh disposable VM**: skip SSH public key, set a password, accept p
 If testing root SSH, confirm that the **root account has a usable password** and login works after boot; do not infer success solely from `qm config`. Ensure SSH port 22 is firewalled from the public Internet. Verify guest log shows no cloud-init failures. For existing booted VMs, configure via guest console/SSH; Cloud-Init settings are not generally replayed on reboot.
 
 Do not delete the attached `snippets` file: the VM needs it for subsequent starts/migration, and VM deletion does not automatically clean it up.
+
+## v0.2.4: Debian 13 root password SSH + finalize (lab plan)
+
+### Phase A — first boot (fresh VM)
+
+1. Install/update to the branch commit on the lab node (`pveosi update --ref <commit>` or `install.sh` from checkout).
+2. Create a **Debian 13** VM **without** an SSH public key; explicitly enable **root SSH password** login; select snippets storage with Snippets enabled.
+3. Complete first boot; run `cloud-init status --wait` in the guest.
+4. Verify PuTTY/SSH root login with the initial password.
+5. Change the root password inside the guest; confirm the old password fails and the new password works.
+
+### Phase B — optional Cloud-Init finalization
+
+1. Inside the guest: create `/etc/cloud/cloud-init.disabled`, reboot, verify network + SSH, shut down cleanly.
+2. On the host (VM stopped): `pveosi finalize <VMID> --dry-run` and review the preview.
+3. Run `pveosi finalize <VMID>`; attest guest preparation; approve host-side changes and optional snippet removal.
+4. Start the VM; verify networking, SSH, current password, and filesystems.
+
+### Inspecting failed VM 121 (do not boot or destroy)
+
+Read-only inspection on the Proxmox node:
+
+```bash
+qm config 121
+qm status 121
+ls -la "$(pvesm path local:snippets/pveosi-121-user.yaml 2>/dev/null)" 2>/dev/null || true
+```
+
+Do **not** boot, destroy, or modify VM 121 unless you explicitly decide to recover or remove it outside this checklist.
