@@ -66,8 +66,8 @@ def _run(cmd: list[str]) -> subprocess.CompletedProcess[str]:
 
 
 def qm_config(vmid: int) -> dict[str, str]:
-    mock = os.environ.get("PVEOSI_MOCK_QM_CONFIG")
-    if mock:
+    if "PVEOSI_MOCK_QM_CONFIG" in os.environ:
+        mock = os.environ["PVEOSI_MOCK_QM_CONFIG"]
         text = Path(mock).read_text(encoding="utf-8")
     else:
         r = _run(["qm", "config", str(vmid)])
