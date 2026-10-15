@@ -39,6 +39,7 @@ CI_KEY_PREFIX = ("ipconfig",)
 SENSITIVE_RE = re.compile(r"(cipassword|password|sshkeys)", re.I)
 BOOT_KEYS = ("scsi0", "scsi1", "sata0", "sata1", "virtio0", "virtio1")
 NET_KEYS = ("net0", "net1", "net2", "net3")
+HARDWARE_PRESERVE_KEYS = ("vga", "serial0", "serial1", "serial2", "tablet")
 VM_CLOUDINIT_VOL_RE = re.compile(r"^vm-(\d+)-cloudinit$")
 
 
@@ -87,8 +88,37 @@ class FinalizePlan:
     already_finalized: bool = False
 
 
-def _run(cmd: list[str]) -> subprocess.CompletedProcess[str]:
+def _run_subprocess(cmd: list[str]) -> subprocess.CompletedProcess[str]:
     return subprocess.run(cmd, capture_output=True, text=True)
+
+
+def _config_dict_to_text(cfg: dict[str, str]) -> str:
+    return "\n".join(f"{k}: {v}" for k, v in sorted(cfg.items())) + "\n"
+
+
+def _mock_stateful_qm_set_delete(vmid: str, key: str) -> subprocess.CompletedProcess[str]:
+    path = Path(os.environ["PVEOSI_MOCK_QM_CONFIG"])
+    cfg = _parse_config_text(path.read_text(encoding="utf-8"))
+    fail_on = {s.strip() for s in os.environ.get("PVEOSI_MOCK_QM_SET_FAIL_ON", "").split(",") if s.strip()}
+    if key in fail_on:
+        return subprocess.CompletedProcess(
+            ["qm", "set", vmid, "--delete", key], 1, "", f"mock: refused delete {key}\n"
+        )
+    if key not in cfg:
+        return subprocess.CompletedProcess(
+            ["qm", "set", vmid, "--delete", key], 1, "", f"mock: unknown key {key}\n"
+        )
+    del cfg[key]
+    path.write_text(_config_dict_to_text(cfg), encoding="utf-8")
+    return subprocess.CompletedProcess(["qm", "set", vmid, "--delete", key], 0, "", "")
+
+
+def _run(cmd: list[str]) -> subprocess.CompletedProcess[str]:
+    if os.environ.get("PVEOSI_MOCK_STATEFUL") == "1" and len(cmd) >= 5:
+        if cmd[0] == "qm" and cmd[1] == "set" and "--delete" in cmd:
+            key = cmd[cmd.index("--delete") + 1]
+            return _mock_stateful_qm_set_delete(cmd[2], key)
+    return _run_subprocess(cmd)
 
 
 def _parse_config_text(text: str) -> dict[str, str]:
@@ -103,10 +133,45 @@ def _parse_config_text(text: str) -> dict[str, str]:
     return out
 
 
-def qm_config(vmid: int) -> dict[str, str]:
-    if "PVEOSI_MOCK_QM_CONFIG" in os.environ:
+def _pvesh_config_to_dict(payload: Any) -> dict[str, str]:
+    if isinstance(payload, dict):
+        data = payload.get("data", payload)
+        if isinstance(data, dict):
+            return {str(k): str(v) for k, v in data.items()}
+    raise FinalizeError("Unexpected VM config API response format.")
+
+
+def qm_config(vmid: int, node: Optional[str] = None) -> dict[str, str]:
+    mock_pvesh = os.environ.get("PVEOSI_MOCK_PVESH_CONFIGS")
+    if node and mock_pvesh:
+        store = json.loads(Path(mock_pvesh).read_text(encoding="utf-8"))
+        entry = store.get(f"{node}:{vmid}")
+        if entry is None:
+            raise FinalizeError(f"Cannot read VM {vmid} configuration on node {node}.")
+        if isinstance(entry, str):
+            return _parse_config_text(entry)
+        if isinstance(entry, dict):
+            return {str(k): str(v) for k, v in entry.items()}
+        raise FinalizeError(f"Cannot read VM {vmid} configuration on node {node}.")
+    if node is None and "PVEOSI_MOCK_QM_CONFIG" in os.environ:
         text = Path(os.environ["PVEOSI_MOCK_QM_CONFIG"]).read_text(encoding="utf-8")
         return _parse_config_text(text)
+    if node:
+        r = _run(
+            [
+                "pvesh",
+                "get",
+                f"/nodes/{node}/qemu/{vmid}/config",
+                "--output-format",
+                "json",
+            ]
+        )
+        if r.returncode != 0:
+            raise FinalizeError(f"Cannot read VM {vmid} configuration on node {node}.")
+        try:
+            return _pvesh_config_to_dict(json.loads(r.stdout))
+        except json.JSONDecodeError as exc:
+            raise FinalizeError(f"Cannot parse VM {vmid} configuration on node {node}.") from exc
     r = _run(["qm", "config", str(vmid)])
     if r.returncode != 0:
         raise FinalizeError(f"Cannot read VM {vmid} configuration.")
@@ -114,6 +179,8 @@ def qm_config(vmid: int) -> dict[str, str]:
 
 
 def qm_status(vmid: int) -> str:
+    if "PVEOSI_MOCK_QM_STATUS_FILE" in os.environ:
+        return Path(os.environ["PVEOSI_MOCK_QM_STATUS_FILE"]).read_text(encoding="utf-8").strip()
     if "PVEOSI_MOCK_QM_STATUS" in os.environ:
         return os.environ["PVEOSI_MOCK_QM_STATUS"].strip()
     r = _run(["qm", "status", str(vmid)])
@@ -162,6 +229,11 @@ def qm_snapshots(vmid: int) -> list[str]:
         raise FinalizeError(f"Cannot enumerate snapshots for VM {vmid}; aborting.")
     if "PVEOSI_MOCK_SNAPSHOTS_JSON" in os.environ:
         return _snapshots_from_pvesh_json(json.loads(os.environ["PVEOSI_MOCK_SNAPSHOTS_JSON"]))
+    if "PVEOSI_MOCK_QM_SNAPSHOTS_FILE" in os.environ:
+        raw = Path(os.environ["PVEOSI_MOCK_QM_SNAPSHOTS_FILE"]).read_text(encoding="utf-8").strip()
+        if raw.startswith("["):
+            return _snapshots_from_pvesh_json(json.loads(raw))
+        return [s for s in raw.split(",") if s and s != "current"]
     if "PVEOSI_MOCK_QM_SNAPSHOTS" in os.environ:
         raw = os.environ["PVEOSI_MOCK_QM_SNAPSHOTS"]
         if raw.startswith("["):
@@ -194,13 +266,18 @@ def _cluster_vm_configs() -> dict[int, dict[str, str]]:
     if "PVEOSI_MOCK_CLUSTER_CONFIGS" in os.environ:
         raw = json.loads(Path(os.environ["PVEOSI_MOCK_CLUSTER_CONFIGS"]).read_text(encoding="utf-8"))
         return {int(k): _parse_config_text(v) for k, v in raw.items()}
-    r = _run(["pvesh", "get", "/cluster/resources", "--type", "vm", "--output-format", "json"])
-    if r.returncode != 0:
-        raise FinalizeError("Cannot query cluster VM list for snippet reference checks.")
-    try:
-        resources = json.loads(r.stdout or "[]")
-    except json.JSONDecodeError as exc:
-        raise FinalizeError("Cannot parse cluster VM list.") from exc
+    if "PVEOSI_MOCK_CLUSTER_RESOURCES" in os.environ:
+        resources = json.loads(
+            Path(os.environ["PVEOSI_MOCK_CLUSTER_RESOURCES"]).read_text(encoding="utf-8")
+        )
+    else:
+        r = _run(["pvesh", "get", "/cluster/resources", "--type", "vm", "--output-format", "json"])
+        if r.returncode != 0:
+            raise FinalizeError("Cannot query cluster VM list for snippet reference checks.")
+        try:
+            resources = json.loads(r.stdout or "[]")
+        except json.JSONDecodeError as exc:
+            raise FinalizeError("Cannot parse cluster VM list.") from exc
     configs: dict[int, dict[str, str]] = {}
     for item in resources:
         if not isinstance(item, dict):
@@ -212,7 +289,12 @@ def _cluster_vm_configs() -> dict[int, dict[str, str]]:
             vid = int(vmid)
         except (TypeError, ValueError):
             continue
-        configs[vid] = qm_config(vid)
+        node = item.get("node")
+        if not isinstance(node, str) or not node.strip():
+            raise FinalizeError(
+                f"Cannot determine Proxmox node for VM {vid}; aborting snippet reference checks."
+            )
+        configs[vid] = qm_config(vid, node=node.strip())
     return configs
 
 
@@ -458,6 +540,8 @@ def verify_post_finalize(
         )
     _assert_unchanged(before_config, after, tuple(plan.preserved_boot.keys()), "Boot disk")
     _assert_unchanged(before_config, after, tuple(plan.preserved_net.keys()), "Network")
+    hw_keys = tuple(k for k in HARDWARE_PRESERVE_KEYS if k in before_config)
+    _assert_unchanged(before_config, after, hw_keys, "Hardware")
     orphaned = _unused_cloudinit_entries(after, vmid)
     if orphaned:
         print("NOTE: Cloud-Init volume(s) may remain as unused entries (not deleted automatically):")
@@ -466,23 +550,71 @@ def verify_post_finalize(
         print("Remove manually only after confirming volume identity and ownership.")
 
 
-def _revalidate_for_execute(ctx: VmContext, plan: FinalizePlan) -> None:
+def _current_ci_key_set(config: dict[str, str], vmid: int) -> set[str]:
+    keys = set(_cloudinit_config_keys(config))
+    ide, _ = _find_cloudinit_ide(vmid, config)
+    if ide:
+        keys.add(ide)
+    return keys
+
+
+def _assert_transaction_state(
+    fresh: VmContext,
+    plan: FinalizePlan,
+    remaining_ci_keys: set[str],
+    baseline_config: dict[str, str],
+) -> None:
+    current_ci = _current_ci_key_set(fresh.config, fresh.vmid)
+    if current_ci != remaining_ci_keys:
+        raise FinalizeError(
+            "VM Cloud-Init configuration does not match expected transaction state; "
+            "aborting (possible concurrent change or interrupted prior run)."
+        )
+    if plan.cloudinit_ide:
+        if plan.cloudinit_ide in remaining_ci_keys:
+            if fresh.cloudinit_ide != plan.cloudinit_ide:
+                raise FinalizeError("Cloud-Init disk identity changed; aborting.")
+            if fresh.cloudinit_volume and plan.cloudinit_spec and fresh.cloudinit_volume.raw != plan.cloudinit_spec:
+                raise FinalizeError("Cloud-Init disk specification changed; aborting.")
+        elif fresh.cloudinit_ide is not None:
+            raise FinalizeError("Cloud-Init IDE device still attached unexpectedly; aborting.")
+
+    removable = set(plan.config_keys_to_remove)
+    for key, val in baseline_config.items():
+        if key in removable:
+            if key in remaining_ci_keys:
+                if fresh.config.get(key) != val:
+                    raise FinalizeError(
+                        f"Cloud-Init key {key} was modified during finalization; aborting."
+                    )
+            elif key in fresh.config:
+                raise FinalizeError(
+                    f"Cloud-Init key {key} should have been removed but is still present; aborting."
+                )
+        elif fresh.config.get(key) != val:
+            raise FinalizeError(
+                f"Non-Cloud-Init configuration changed during finalization ({key}); aborting."
+            )
+    for key in fresh.config:
+        if key not in baseline_config and not key.startswith("unused"):
+            raise FinalizeError(
+                f"Unexpected configuration key appeared during finalization ({key}); aborting."
+            )
+
+
+def _revalidate_for_execute(
+    ctx: VmContext,
+    plan: FinalizePlan,
+    remaining_ci_keys: set[str],
+    baseline_config: dict[str, str],
+) -> None:
     fresh = load_context(ctx.vmid)
     validate_preconditions(fresh)
     if fresh.status != "stopped":
         raise FinalizeError("VM is no longer stopped; aborting.")
     if fresh.snapshots:
         raise FinalizeError(f"Snapshots appeared during finalization: {', '.join(fresh.snapshots)}")
-    if fresh.cloudinit_ide != plan.cloudinit_ide:
-        raise FinalizeError("Cloud-Init disk identity changed; aborting.")
-    if fresh.cloudinit_volume and plan.cloudinit_spec and fresh.cloudinit_volume.raw != plan.cloudinit_spec:
-        raise FinalizeError("Cloud-Init disk specification changed; aborting.")
-    expected = set(plan.config_keys_to_remove)
-    current = set(_cloudinit_config_keys(fresh.config))
-    if fresh.cloudinit_ide:
-        current.add(fresh.cloudinit_ide)
-    if current != expected and not (not current and plan.already_finalized):
-        raise FinalizeError("VM Cloud-Init configuration changed since preview; aborting.")
+    _assert_transaction_state(fresh, plan, remaining_ci_keys, baseline_config)
 
 
 def print_guest_checklist() -> None:
@@ -539,19 +671,47 @@ def execute_plan(ctx: VmContext, plan: FinalizePlan) -> None:
         raise FinalizeError(f"Snippet reference is ambiguous: {'; '.join(plan.snippet_blockers)}")
 
     before_config = dict(ctx.config)
-    _revalidate_for_execute(ctx, plan)
+    remaining_ci_keys = set(plan.config_keys_to_remove)
+    _revalidate_for_execute(ctx, plan, remaining_ci_keys, before_config)
 
     applied: list[str] = []
     try:
         for key in plan.config_keys_to_remove:
-            _revalidate_for_execute(ctx, plan)
+            if key not in remaining_ci_keys:
+                continue
+            _revalidate_for_execute(ctx, plan, remaining_ci_keys, before_config)
             r = _run(["qm", "set", str(ctx.vmid), "--delete", key])
             if r.returncode != 0:
+                pending = sorted(remaining_ci_keys)
                 raise FinalizeError(
-                    f"Failed while removing {key}. Applied: {', '.join(applied) or 'none'}. "
+                    f"Failed while removing {key}. Completed: {', '.join(applied) or 'none'}. "
+                    f"Remaining: {', '.join(pending) or 'none'}. "
                     f"Inspect 'qm config {ctx.vmid}' before retrying."
                 )
             applied.append(key)
+            remaining_ci_keys.discard(key)
+            fresh_cfg = qm_config(ctx.vmid)
+            if key in fresh_cfg:
+                raise FinalizeError(
+                    f"Proxmox did not remove {key}. Completed: {', '.join(applied)}. "
+                    f"Remaining: {', '.join(sorted(remaining_ci_keys)) or 'none'}."
+                )
+            _assert_transaction_state(
+                VmContext(
+                    vmid=ctx.vmid,
+                    config=fresh_cfg,
+                    status=qm_status(ctx.vmid),
+                    snapshots=qm_snapshots(ctx.vmid),
+                    pveosi_owned=ctx.pveosi_owned,
+                    cloudinit_ide=_find_cloudinit_ide(ctx.vmid, fresh_cfg)[0],
+                    cloudinit_volume=_find_cloudinit_ide(ctx.vmid, fresh_cfg)[1],
+                    cicustom_user=_parse_cicustom_user(fresh_cfg) if "cicustom" in fresh_cfg else None,
+                    snippet_vmid=ctx.snippet_vmid,
+                ),
+                plan,
+                remaining_ci_keys,
+                before_config,
+            )
         verify_post_finalize(ctx.vmid, plan, before_config)
     except FinalizeError:
         raise
