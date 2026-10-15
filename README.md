@@ -12,7 +12,7 @@ curl -fsSLo /root/proxmox-os-installer-bootstrap.sh \
 bash /root/proxmox-os-installer-bootstrap.sh
 ```
 
-Review the bootstrap script before running it as root. It downloads the repository archive over HTTPS and installs local CLI files only; it does not install host packages or change cluster networking.
+The bootstrap invokes the downloaded install script through Bash to avoid archive file-mode and noexec temporary-directory issues. Review the bootstrap script before running it as root. It downloads the repository archive over HTTPS and installs local CLI files only; it does not install host packages or change cluster networking.
 
 **Pinned / production installs:** set `PROXMOX_OS_INSTALLER_REF` to a reviewed tag or commit:
 
