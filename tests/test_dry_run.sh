@@ -25,7 +25,8 @@ chmod +x "$TMP/bin/"*
   for _ in {1..5}; do printf '\n'; done
   for _ in {1..4}; do printf '\n'; done
   printf '\n\n'
-  printf 'test-password\ntest-password\nn\n'
+  printf 'n\n'
+  printf 'test-password\ntest-password\n'
 } | PATH="$TMP/bin:$PATH" "$REPO/bin/proxmox-os-installer" --dry-run > "$TMP/log" 2>&1
 grep -q 'Debian 12 (Bookworm)' "$TMP/log"
 grep -q 'DRY RUN: no downloads' "$TMP/log"
