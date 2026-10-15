@@ -5,6 +5,7 @@ import sys
 import subprocess
 import tarfile
 import tempfile
+import threading
 import unittest
 from io import BytesIO
 from pathlib import Path
@@ -62,8 +63,11 @@ class UpdateEngineTests(unittest.TestCase):
         )
         self.paths.alias_bindir.mkdir(parents=True)
         os.environ["PVEOSI_INSTALL_ROOT"] = str(self.install_root)
+        os.environ["PVEOSI_UPDATE_LOCK"] = str(Path(self.tmp) / "update.lock")
         os.environ["PVEOSI_UPDATE_ALLOW_NONROOT"] = "1"
         os.environ["PVEOSI_INSTALL_ALLOW_NONROOT"] = "1"
+        os.environ["PVEOSI_INSTALL_ENTRY"] = str(self.paths.entry_link)
+        os.environ["PVEOSI_ALIAS_BINDIR"] = str(self.paths.alias_bindir)
 
     def tearDown(self):
         os.environ.pop("PVEOSI_INSTALL_ROOT", None)
@@ -131,7 +135,8 @@ class UpdateEngineTests(unittest.TestCase):
             dest.write_bytes(body)
 
         with mock.patch.object(update_engine, "download_tarball", side_effect=fake_download):
-            out = update_engine.perform_update(self.paths, target)
+            with mock.patch.object(update_engine, "resolve_commit", return_value=commit):
+                out = update_engine.perform_update(self.paths, target, explicit_ref="main")
         self.assertEqual(out.commit, commit)
 
     def test_update_installs_and_metadata(self):
@@ -204,6 +209,187 @@ class UpdateEngineTests(unittest.TestCase):
         bad.write_bytes(b"not a tar")
         with self.assertRaises((update_engine.UpdateError, tarfile.TarError)):
             update_engine.safe_extract_tar(bad, Path(self.tmp) / "x")
+
+    def test_trusted_repo_rejects_deceptive_url(self):
+        with self.assertRaises(update_engine.UpdateError):
+            update_engine.trusted_repo_slug(
+                {"repository": "https://github.com/evil.com/faridze/proxmox-os-installer"}
+            )
+        with self.assertRaises(update_engine.UpdateError):
+            update_engine.trusted_repo_slug({"repository": "https://github.com/other/evil-repo"})
+        with self.assertRaises(update_engine.UpdateError):
+            update_engine.trusted_repo_slug({"repository": "http://github.com/faridze/proxmox-os-installer"})
+        self.assertEqual(
+            update_engine.DEFAULT_REPO,
+            update_engine.trusted_repo_slug({"repository": "https://github.com/faridze/proxmox-os-installer/"}),
+        )
+
+    def _run_fake_update(self, old_commit: str, new_commit: str, version: str = "0.2.3"):
+        pkg = Path(self.tmp) / f"pkg-{new_commit[:8]}"
+        _make_package(pkg, version)
+        body = _tar_bytes(pkg)
+
+        def fake_download(c, dest, repo=update_engine.DEFAULT_REPO):
+            dest.write_bytes(body)
+
+        def fake_resolve(ref, repo=update_engine.DEFAULT_REPO):
+            return new_commit
+
+        target = update_engine.ResolvedTarget(
+            ref="main", commit=new_commit, version=version, source=update_engine.DEFAULT_REPO
+        )
+        with mock.patch.object(update_engine, "download_tarball", side_effect=fake_download):
+            with mock.patch.object(update_engine, "resolve_commit", side_effect=fake_resolve):
+                update_engine.perform_update(self.paths, target, explicit_ref="main")
+        return target
+
+    def test_consecutive_updates_retain_previous_generation(self):
+        c1 = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        c2 = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        c3 = "cccccccccccccccccccccccccccccccccccccccc"
+        self._write_meta(commit_sha=c1)
+        (self.install_root / "VERSION").write_text("1.0.0\n")
+        os.environ["PVEOSI_UPDATE_LOCK"] = str(Path(self.tmp) / "lock")
+        os.environ["PVEOSI_INSTALL_ENTRY"] = str(self.paths.entry_link)
+        os.environ["PVEOSI_ALIAS_BINDIR"] = str(self.paths.alias_bindir)
+
+        prev = update_engine.previous_path(self.paths)
+        self._run_fake_update(c1, c2, "2.0.0")
+        self.assertTrue(prev.exists())
+        self.assertEqual((prev / "VERSION").read_text().strip(), "1.0.0")
+
+        self._run_fake_update(c2, c3, "3.0.0")
+        self.assertTrue(prev.exists())
+        self.assertEqual((prev / "VERSION").read_text().strip(), "2.0.0")
+        self.assertEqual(
+            json.loads(self.paths.metadata_path.read_text())["commit_sha"],
+            c3,
+        )
+
+    def test_stale_update_aborts_if_install_changed(self):
+        old = "1111111111111111111111111111111111111111"
+        new = "2222222222222222222222222222222222222222"
+        other = "3333333333333333333333333333333333333333"
+        self._write_meta(commit_sha=old)
+        os.environ["PVEOSI_UPDATE_LOCK"] = str(Path(self.tmp) / "lock")
+
+        pkg = Path(self.tmp) / "pkg"
+        _make_package(pkg, "9.9.9")
+        body = _tar_bytes(pkg)
+        target = update_engine.ResolvedTarget(ref="main", commit=new, version="9.9.9", source=update_engine.DEFAULT_REPO)
+
+        def fake_download(c, dest, repo=update_engine.DEFAULT_REPO):
+            dest.write_bytes(body)
+
+        original_stage = update_engine.stage_install
+
+        def stage_mutate(*args, **kwargs):
+            update_engine.write_metadata(
+                self.paths,
+                {
+                    "version": "x",
+                    "commit_sha": other,
+                    "repository": update_engine.DEFAULT_REPO_HTTPS,
+                    "install_ref": "main",
+                    "channel": "main",
+                    "installed_at": "2026-01-01T00:00:00Z",
+                },
+            )
+            return original_stage(*args, **kwargs)
+
+        with mock.patch.object(update_engine, "download_tarball", side_effect=fake_download):
+            with mock.patch.object(update_engine, "stage_install", side_effect=stage_mutate):
+                with self.assertRaises(update_engine.UpdateError) as ctx:
+                    update_engine.perform_update(self.paths, target, explicit_ref="main")
+        self.assertIn("changed during update", str(ctx.exception).lower())
+
+    def test_concurrent_updates_second_fails_fast(self):
+        c1 = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        c2 = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        self._write_meta(commit_sha=c1)
+        os.environ["PVEOSI_UPDATE_LOCK"] = str(Path(self.tmp) / "lock")
+        os.environ["PVEOSI_INSTALL_ENTRY"] = str(self.paths.entry_link)
+        os.environ["PVEOSI_ALIAS_BINDIR"] = str(self.paths.alias_bindir)
+        pkg = Path(self.tmp) / "pkg"
+        _make_package(pkg, "2.0.0")
+        body = _tar_bytes(pkg)
+        holder_started = threading.Event()
+        release_holder = threading.Event()
+        errors: list[Exception] = []
+
+        def slow_download(c, dest, repo=update_engine.DEFAULT_REPO):
+            holder_started.set()
+            release_holder.wait(timeout=10)
+            dest.write_bytes(body)
+
+        target = update_engine.ResolvedTarget(
+            ref="main", commit=c2, version="2.0.0", source=update_engine.DEFAULT_REPO
+        )
+
+        def holder():
+            try:
+                with mock.patch.object(update_engine, "download_tarball", side_effect=slow_download):
+                    update_engine.perform_update(self.paths, target, explicit_ref="main")
+            except Exception as exc:  # noqa: BLE001
+                errors.append(exc)
+
+        t1 = threading.Thread(target=holder)
+        t1.start()
+        self.assertTrue(holder_started.wait(timeout=5))
+        try:
+            update_engine.perform_update(self.paths, target, explicit_ref="main")
+        except update_engine.UpdateError as exc:
+            errors.append(exc)
+        release_holder.set()
+        t1.join(timeout=15)
+        in_progress = [e for e in errors if "already in progress" in str(e).lower()]
+        self.assertEqual(len(in_progress), 1)
+
+    def test_metadata_write_failure_restores_backup(self):
+        old = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        new = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        self._write_meta(commit_sha=old)
+        (self.install_root / "VERSION").write_text("1.0.0\n")
+        os.environ["PVEOSI_UPDATE_LOCK"] = str(Path(self.tmp) / "lock")
+        os.environ["PVEOSI_INSTALL_ENTRY"] = str(self.paths.entry_link)
+        os.environ["PVEOSI_ALIAS_BINDIR"] = str(self.paths.alias_bindir)
+        pkg = Path(self.tmp) / "pkg"
+        _make_package(pkg, "2.0.0")
+        body = _tar_bytes(pkg)
+        target = update_engine.ResolvedTarget(ref="main", commit=new, version="2.0.0", source=update_engine.DEFAULT_REPO)
+
+        def fake_download(c, dest, repo=update_engine.DEFAULT_REPO):
+            dest.write_bytes(body)
+
+        with mock.patch.object(update_engine, "download_tarball", side_effect=fake_download):
+            with mock.patch.object(update_engine, "write_metadata", side_effect=OSError("disk full")):
+                with self.assertRaises(update_engine.UpdateError):
+                    update_engine.perform_update(self.paths, target, explicit_ref="main")
+        self.assertEqual((self.install_root / "VERSION").read_text().strip(), "1.0.0")
+        meta = json.loads(self.paths.metadata_path.read_text())
+        self.assertEqual(meta["commit_sha"], old)
+
+    def test_staging_failure_leaves_live_install(self):
+        self._write_meta()
+        os.environ["PVEOSI_UPDATE_LOCK"] = str(Path(self.tmp) / "lock")
+        pkg = Path(self.tmp) / "pkg"
+        _make_package(pkg)
+        body = _tar_bytes(pkg)
+        target = update_engine.ResolvedTarget(
+            ref="main",
+            commit="dddddddddddddddddddddddddddddddddddddddd",
+            version="9.9.9",
+            source=update_engine.DEFAULT_REPO,
+        )
+
+        def fake_download(c, dest, repo=update_engine.DEFAULT_REPO):
+            dest.write_bytes(body)
+
+        with mock.patch.object(update_engine, "download_tarball", side_effect=fake_download):
+            with mock.patch.object(update_engine, "stage_install", side_effect=subprocess.CalledProcessError(1, "bash")):
+                with self.assertRaises(update_engine.UpdateError):
+                    update_engine.perform_update(self.paths, target, explicit_ref="main")
+        self.assertFalse(update_engine.staging_path(self.paths).exists())
 
 
 if __name__ == "__main__":

@@ -43,7 +43,7 @@ pveosi update --ref <tag-or-commit>   # install a specific reviewed ref
 - Installs pinned to a **commit** or **non-main branch** stay on that channel; they are **not** silently switched to `main`. Use `--ref` to move to another ref (including `main`) explicitly.
 - If provenance is unknown (no metadata), specify `--ref` instead of guessing.
 
-**Rollback:** each update stages a full tree, validates it, then swaps the install directory. The previous install is kept as `proxmox-os-installer.previous` until the next successful update; if activation fails, the prior tree is restored automatically.
+**Rollback:** each update stages a full tree, validates it, then swaps the install directory. During activation the replaced live tree is held in `proxmox-os-installer.staging` until aliases, metadata, and post-checks succeed; it is then moved to `proxmox-os-installer.previous`, replacing the prior one-generation backup. If activation fails, the live tree is restored from `.staging` and `.previous` is left unchanged. A failed install may leave `proxmox-os-installer.broken` for manual inspection.
 
 **Security:** updates trust GitHub over TLS; there are no detached signatures yet. Pin refs for production. Updates touch only this application's files under `/usr/local` and metadata; they do **not** modify VMs, image cache, snippets, or Proxmox storage/network settings.
 

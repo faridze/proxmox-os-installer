@@ -22,9 +22,12 @@ from typing import Any, Optional
 
 DEFAULT_REPO = "faridze/proxmox-os-installer"
 DEFAULT_REPO_HTTPS = f"https://github.com/{DEFAULT_REPO}"
-API_BASE = f"https://api.github.com/repos/{DEFAULT_REPO}"
+TRUSTED_REPO_SLUGS = frozenset({DEFAULT_REPO})
 METADATA_FILENAME = "install-metadata.json"
 LOCK_PATH = "/var/lock/proxmox-os-installer-update.lock"
+SUFFIX_PREVIOUS = ".previous"
+SUFFIX_BROKEN = ".broken"
+SUFFIX_STAGING = ".staging"
 
 REF_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._/-]{0,200}$")
 FULL_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
@@ -95,6 +98,70 @@ class InstallPaths:
 
 def _env_path(name: str, default: str) -> Path:
     return Path(os.environ.get(name, default))
+
+
+def sibling_path(install_root: Path, suffix: str) -> Path:
+    """Recovery path adjacent to install_root; must not follow unsafe symlinks."""
+    parent = install_root.parent.resolve()
+    name = install_root.name
+    if not name or name in (".", "..") or "/" in name:
+        raise UpdateError("Unsafe install root path.")
+    candidate = parent / f"{name}{suffix}"
+    resolved_parent = candidate.parent.resolve()
+    if resolved_parent != parent:
+        raise UpdateError("Refusing recovery path outside install parent directory.")
+    if candidate.is_symlink():
+        raise UpdateError(f"Refusing unsafe recovery symlink: {candidate}")
+    return candidate
+
+
+def previous_path(paths: InstallPaths) -> Path:
+    return sibling_path(paths.install_root, SUFFIX_PREVIOUS)
+
+
+def broken_path(paths: InstallPaths) -> Path:
+    return sibling_path(paths.install_root, SUFFIX_BROKEN)
+
+
+def staging_path(paths: InstallPaths) -> Path:
+    return sibling_path(paths.install_root, SUFFIX_STAGING)
+
+
+def assert_safe_install_root(paths: InstallPaths) -> Path:
+    root = paths.install_root
+    if root.is_symlink():
+        raise UpdateError("Install root must not be a symlink.")
+    return root
+
+
+def trusted_repo_slug(meta: dict[str, Any]) -> str:
+    """Return the only allowed repository slug; reject deceptive metadata."""
+    raw = meta.get("repository")
+    if raw is None or (isinstance(raw, str) and not raw.strip()):
+        return DEFAULT_REPO
+    if not isinstance(raw, str):
+        raise UpdateError("Invalid installation repository metadata.")
+    value = raw.strip()
+    slug: Optional[str] = None
+    if value in TRUSTED_REPO_SLUGS:
+        slug = value
+    elif value.rstrip("/") in (DEFAULT_REPO_HTTPS, f"{DEFAULT_REPO_HTTPS}/"):
+        slug = DEFAULT_REPO
+    elif value.startswith("https://github.com/"):
+        tail = value[len("https://github.com/") :].strip("/")
+        if "@" in tail or "?" in tail or "#" in tail or "://" in tail:
+            raise UpdateError("Refusing malformed repository URL in installation metadata.")
+        parts = tail.split("/")
+        if len(parts) != 2 or not parts[0] or not parts[1]:
+            raise UpdateError("Refusing malformed repository URL in installation metadata.")
+        slug = f"{parts[0]}/{parts[1]}"
+    elif value.startswith("http://"):
+        raise UpdateError("Refusing non-HTTPS repository URL in installation metadata.")
+    else:
+        raise UpdateError("Refusing update from an unexpected repository; use bootstrap with official repo.")
+    if slug not in TRUSTED_REPO_SLUGS:
+        raise UpdateError("Refusing untrusted repository in installation metadata.")
+    return slug
 
 
 def default_paths() -> InstallPaths:
@@ -363,6 +430,8 @@ def pick_update_ref(
 
 def acquire_lock(lock_path: Path) -> int:
     lock_path.parent.mkdir(parents=True, exist_ok=True)
+    if lock_path.is_symlink():
+        raise UpdateError("Refusing unsafe update lock path.")
     fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR, 0o600)
     try:
         fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -372,32 +441,106 @@ def acquire_lock(lock_path: Path) -> int:
     return fd
 
 
+def release_lock(lock_fd: int) -> None:
+    try:
+        fcntl.flock(lock_fd, fcntl.LOCK_UN)
+    finally:
+        os.close(lock_fd)
+
+
+def recover_interrupted_paths(paths: InstallPaths) -> None:
+    """Normalize leftover directories from a failed or partial update."""
+    live = assert_safe_install_root(paths)
+    staging = staging_path(paths)
+    broken = broken_path(paths)
+    if staging.exists():
+        if live.exists():
+            shutil.rmtree(staging, ignore_errors=True)
+        else:
+            try:
+                staging.rename(live)
+            except OSError as exc:
+                raise UpdateError(
+                    f"Interrupted update left staging directory; manual recovery may be required: {staging}"
+                ) from exc
+    if broken.exists() and not live.exists():
+        prev = previous_path(paths)
+        try:
+            broken.rename(live)
+        except OSError:
+            if not prev.exists():
+                raise UpdateError(
+                    f"Failed install at {broken}; inspect manually before retrying."
+                ) from None
+
+
 def activate_stage(stage_root: Path, paths: InstallPaths) -> Path:
-    """Swap stage into install_root; return backup path for rollback."""
-    previous = paths.install_root.parent / f"{paths.install_root.name}.previous"
-    live = paths.install_root
-    if previous.exists():
-        shutil.rmtree(previous)
+    """Swap stage into install_root; return path to the replaced live tree (pending backup)."""
+    live = assert_safe_install_root(paths)
+    pending = staging_path(paths)
+    if pending.exists():
+        shutil.rmtree(pending)
     if live.exists():
-        live.rename(previous)
+        try:
+            live.rename(pending)
+        except OSError as exc:
+            raise UpdateError(f"Could not move current installation aside: {exc}") from exc
     try:
         stage_root.rename(live)
-    except OSError:
-        if previous.exists() and not live.exists():
-            previous.rename(live)
-        raise
-    return previous
+    except OSError as exc:
+        if pending.exists() and not live.exists():
+            try:
+                pending.rename(live)
+            except OSError:
+                pass
+        raise UpdateError(f"Could not activate staged installation: {exc}") from exc
+    return pending
 
 
-def rollback(paths: InstallPaths, previous: Path) -> None:
-    live = paths.install_root
-    broken = paths.install_root.parent / f"{paths.install_root.name}.broken"
+def commit_previous_backup(paths: InstallPaths, pending_backup: Path) -> None:
+    """Retain one generation: replace .previous only after the new live tree is active."""
+    if not pending_backup.exists():
+        return
+    prev = previous_path(paths)
+    if prev.exists():
+        shutil.rmtree(prev)
+    pending_backup.rename(prev)
+
+
+def rollback(paths: InstallPaths, pending_backup: Path) -> None:
+    """Restore the installation tree replaced during activate_stage."""
+    live = assert_safe_install_root(paths)
+    broken = broken_path(paths)
     if live.exists():
         if broken.exists():
             shutil.rmtree(broken)
-        live.rename(broken)
-    if previous.exists():
-        previous.rename(live)
+        try:
+            live.rename(broken)
+        except OSError as exc:
+            raise UpdateError(
+                f"Automatic rollback incomplete; inspect {broken} and {live} manually."
+            ) from exc
+    if pending_backup.exists():
+        try:
+            pending_backup.rename(live)
+        except OSError as exc:
+            raise UpdateError(
+                f"Automatic rollback incomplete; prior tree remains at {pending_backup}."
+            ) from exc
+
+
+def assert_install_unchanged_for_update(
+    paths: InstallPaths,
+    baseline_commit: Optional[str],
+    target: ResolvedTarget,
+) -> None:
+    current = installed_commit(paths, load_metadata(paths))
+    if current and current == target.commit:
+        raise UpdateError("Installation is already at the target commit.")
+    if baseline_commit and current and current != baseline_commit:
+        raise UpdateError(
+            "Installation changed during update; another update may have completed. Re-run update --check."
+        )
 
 
 def plan_update(
@@ -405,13 +548,7 @@ def plan_update(
     explicit_ref: Optional[str],
 ) -> ResolvedTarget:
     meta = load_metadata(paths)
-    repo_slug = DEFAULT_REPO
-    if isinstance(meta.get("repository"), str) and "github.com/" in meta["repository"]:
-        slug = meta["repository"].split("github.com/", 1)[-1].strip("/")
-        if re.match(r"^[\w.-]+/[\w.-]+$", slug):
-            repo_slug = slug
-    elif meta.get("repository") and meta["repository"] != DEFAULT_REPO_HTTPS:
-        raise UpdateError("Refusing update from an unexpected repository; use bootstrap with official repo.")
+    repo_slug = trusted_repo_slug(meta)
 
     ref = pick_update_ref(meta, explicit_ref)
     commit = resolve_commit(ref, repo_slug)
@@ -427,57 +564,90 @@ def perform_update(
     paths: InstallPaths,
     target: ResolvedTarget,
     check_only: bool = False,
+    explicit_ref: Optional[str] = None,
 ) -> ResolvedTarget:
-    meta = load_metadata(paths)
-    installed_ver = read_version(paths.install_root) if paths.install_root.is_dir() else meta.get("version", "unknown")
-    cur_commit = installed_commit(paths, meta) or "(unknown)"
+    assert_safe_install_root(paths)
+    recover_interrupted_paths(paths)
 
-    work_parent = paths.install_root.parent
-    work_parent.mkdir(parents=True, exist_ok=True)
-    with tempfile.TemporaryDirectory(prefix="pveosi-update.", dir=str(work_parent)) as tmp:
-        tmp_path = Path(tmp)
-        archive = tmp_path / "source.tar.gz"
-        download_tarball(target.commit, archive, target.source)
-        extract_root = tmp_path / "extract"
-        tree = safe_extract_tar(archive, extract_root)
-        run_validation(tree)
-        target.version = read_version(tree)
+    lock_path = Path(os.environ.get("PVEOSI_UPDATE_LOCK", LOCK_PATH))
+    lock_fd = acquire_lock(lock_path)
+    try:
+        meta = load_metadata(paths)
+        baseline_commit = installed_commit(paths, meta)
 
-        if cur_commit != "(unknown)" and cur_commit == target.commit:
+        # Re-plan under lock so metadata/channel rules match current installation.
+        target = plan_update(paths, explicit_ref)
+        if baseline_commit and baseline_commit == target.commit:
             return target
+        assert_install_unchanged_for_update(paths, baseline_commit, target)
 
-        if check_only:
-            return target
-
-        stage_root = tmp_path / "stage"
-        new_meta = {
-            "version": target.version,
-            "commit_sha": target.commit,
-            "repository": DEFAULT_REPO_HTTPS,
-            "install_ref": target.ref if target.ref != target.commit else target.commit,
-            "channel": target.ref,
-            "installed_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-        }
-        stage_install(tree, stage_root, new_meta, paths)
-        run_validation(stage_root, installed=True)
-
-        lock_path = Path(os.environ.get("PVEOSI_UPDATE_LOCK", LOCK_PATH))
-        lock_fd = acquire_lock(lock_path)
-        previous = Path()
-        try:
-            print("Installing...")
-            previous = activate_stage(stage_root, paths)
+        work_parent = paths.install_root.parent
+        work_parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(prefix="pveosi-update.", dir=str(work_parent)) as tmp:
+            tmp_path = Path(tmp)
             try:
-                refresh_aliases(paths.install_root, paths)
-                write_metadata(paths, new_meta)
-            except Exception:
-                rollback(paths, previous)
-                raise UpdateError("Update failed during activation; previous version restored.") from None
-        finally:
-            fcntl.flock(lock_fd, fcntl.LOCK_UN)
-            os.close(lock_fd)
-        if previous.exists():
-            shutil.rmtree(previous, ignore_errors=True)
+                archive = tmp_path / "source.tar.gz"
+                download_tarball(target.commit, archive, target.source)
+                extract_root = tmp_path / "extract"
+                tree = safe_extract_tar(archive, extract_root)
+                run_validation(tree)
+                target.version = read_version(tree)
+
+                if baseline_commit and baseline_commit == target.commit:
+                    return target
+
+                if check_only:
+                    return target
+
+                assert_install_unchanged_for_update(paths, baseline_commit, target)
+
+                stage_root = tmp_path / "stage"
+                new_meta = {
+                    "version": target.version,
+                    "commit_sha": target.commit,
+                    "repository": DEFAULT_REPO_HTTPS,
+                    "install_ref": target.ref if target.ref != target.commit else target.commit,
+                    "channel": target.ref,
+                    "installed_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                }
+                try:
+                    stage_install(tree, stage_root, new_meta, paths)
+                except (OSError, subprocess.CalledProcessError) as exc:
+                    raise UpdateError("Staging installation failed.") from exc
+                try:
+                    run_validation(stage_root, installed=True)
+                except (OSError, subprocess.CalledProcessError) as exc:
+                    raise UpdateError("Staged installation failed validation.") from exc
+
+                assert_install_unchanged_for_update(paths, baseline_commit, target)
+
+                pending_backup = Path()
+                print("Installing...")
+                try:
+                    pending_backup = activate_stage(stage_root, paths)
+                except UpdateError:
+                    raise
+                except OSError as exc:
+                    raise UpdateError(f"Activation failed: {exc}") from exc
+
+                try:
+                    refresh_aliases(paths.install_root, paths)
+                    write_metadata(paths, new_meta)
+                    run_validation(paths.install_root, installed=True)
+                except Exception as exc:
+                    try:
+                        rollback(paths, pending_backup)
+                    except UpdateError as rollback_exc:
+                        raise UpdateError(
+                            f"Update failed ({exc}); automatic rollback also failed: {rollback_exc}"
+                        ) from exc
+                    raise UpdateError("Update failed during activation; previous version restored.") from exc
+
+                commit_previous_backup(paths, pending_backup)
+            except tarfile.TarError as exc:
+                raise UpdateError("Downloaded archive is corrupt or unreadable.") from exc
+    finally:
+        release_lock(lock_fd)
 
     return target
 
@@ -572,7 +742,7 @@ def cmd_update(argv: list[str]) -> int:
     print("Updating...")
     print("Verifying package...")
     try:
-        perform_update(paths, target, check_only=False)
+        perform_update(paths, target, check_only=False, explicit_ref=args.ref)
     except NetworkError as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 1
@@ -581,6 +751,9 @@ def cmd_update(argv: list[str]) -> int:
         return 1
     except subprocess.CalledProcessError:
         print("ERROR: validation or install failed.", file=sys.stderr)
+        return 1
+    except OSError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
         return 1
 
     print("Update successful.")
