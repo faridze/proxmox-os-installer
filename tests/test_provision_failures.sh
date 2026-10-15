@@ -51,7 +51,7 @@ inputs() {
   printf '1\n1\n'
   for _ in {1..5}; do printf '\n'; done
   for _ in {1..4}; do printf '\n'; done
-  printf '\n\npw\npw\nn\ny\n'
+  printf '\n\nn\npw\npw\ny\n'
 }
 
 # Checksum mismatch

@@ -52,7 +52,8 @@ inputs_default() {
   for _ in {1..5}; do printf '\n'; done
   for _ in {1..4}; do printf '\n'; done
   printf '\n\n'
-  printf 'pw\npw\nn\n'
+  printf 'n\n'
+  printf 'pw\npw\n'
 }
 
 run_dry() {
