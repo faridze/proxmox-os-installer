@@ -12,7 +12,11 @@ setup_base() {
 #!/usr/bin/env bash
 CFG="${QM_CFG}"
 case "$1" in
-  config) [[ -f "$CFG" ]] && exit 0 || exit 1;;
+  config)
+    if [[ -f "$CFG" ]]; then exit 0; fi
+    printf 'Configuration file does not exist\n' >&2
+    exit 2
+    ;;
   create) exit 0;;
   set) exit "${QM_SET_RC:-0}";;
   resize) exit 0;;

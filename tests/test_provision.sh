@@ -12,7 +12,11 @@ write_qm_mock() {
 LOG="${QM_LOG:-/tmp/qm.log}"
 printf '%s\n' "$*" >> "$LOG"
 case "$1" in
-  config) exit "${QM_CONFIG_RC:-1}";;
+  config)
+    if [[ "${QM_CONFIG_RC:-}" == 0 ]]; then exit 0; fi
+    printf 'Configuration file does not exist\n' >&2
+    exit 2
+    ;;
   create) exit "${QM_CREATE_RC:-0}";;
   set)
     if [[ "${QM_FAIL_SET:-}" == "scsi0" && "$*" == *import-from* ]]; then exit 12; fi

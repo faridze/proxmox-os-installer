@@ -3,7 +3,7 @@
 set -Eeuo pipefail
 umask 077
 
-VERSION="0.2.0"
+VERSION="0.2.1"
 SELF="$(readlink -f -- "${BASH_SOURCE[0]}")"
 ROOT="$(cd -- "$(dirname -- "$SELF")/.." && pwd -P)"
 CATALOG="${ROOT}/catalog/os-images.tsv"
@@ -21,6 +21,7 @@ CREATED=0
 TMP_IMG=""
 TMP_SUM=""
 TMP_SSH=""
+SSH_INLINE_VALIDATED=0
 DRY_RUN=0
 STAGE_NUM=0
 STAGE_LABEL=""
@@ -141,7 +142,6 @@ PY
   *) error 'Network mode must be dhcp or static.' ;;
 esac
 
-TMP_SSH="$(mktemp)"
 collect_auth
 print_summary
 
@@ -189,24 +189,25 @@ python3 "$PREFLIGHT" image-validate "$CACHED_IMAGE" "$DISK_GIB" >/dev/null || \
 assert_vmid_free
 
 stage 'VM creation'
-run_qm create "$VMID" --name "$NAME" --cores "$CORES" --cpu host \
+qm_run "create VM ${VMID}" create "$VMID" --name "$NAME" --cores "$CORES" --cpu host \
   --memory "$RAM_MIB" --net0 "$NIC" --scsihw virtio-scsi-single \
   --serial0 socket --vga serial0 --agent enabled=1 --ostype l26
 CREATED=1
 
 stage 'Disk import and resize'
-run_qm set "$VMID" --scsi0 "${STORAGE}:0,import-from=${CACHED_IMAGE},discard=on,iothread=1,ssd=1"
-run_qm resize "$VMID" scsi0 "${DISK_GIB}G"
+qm_run "import disk for VM ${VMID} onto ${STORAGE}" set "$VMID" \
+  --scsi0 "${STORAGE}:0,import-from=${CACHED_IMAGE},discard=on,iothread=1,ssd=1"
+qm_run "resize VM ${VMID} disk to ${DISK_GIB} GiB" resize "$VMID" scsi0 "${DISK_GIB}G"
 
 stage 'Cloud-Init configuration'
-run_qm set "$VMID" --ide2 "${STORAGE}:cloudinit"
-run_qm set "$VMID" --boot 'order=scsi0'
-run_qm set "$VMID" --ciuser "$USERNAME"
-run_qm set "$VMID" --ipconfig0 "$IP_CONFIG"
-[[ -n "$DNS" ]] && run_qm set "$VMID" --nameserver "$DNS"
-[[ -n "$SSH_PUBKEY" ]] && run_qm set "$VMID" --sshkeys "$SSH_PUBKEY"
+qm_run "attach cloud-init drive for VM ${VMID}" set "$VMID" --ide2 "${STORAGE}:cloudinit"
+qm_run "set boot order for VM ${VMID}" set "$VMID" --boot 'order=scsi0'
+qm_run "set cloud-init user for VM ${VMID}" set "$VMID" --ciuser "$USERNAME"
+qm_run "set cloud-init network for VM ${VMID}" set "$VMID" --ipconfig0 "$IP_CONFIG"
+[[ -n "$DNS" ]] && qm_run "set DNS for VM ${VMID}" set "$VMID" --nameserver "$DNS"
+[[ -n "$SSH_PUBKEY" ]] && qm_run "set SSH keys for VM ${VMID}" set "$VMID" --sshkeys "$SSH_PUBKEY"
 if (( PASSWORD_SET == 1 )); then
-  run_qm set "$VMID" --cipassword "$PASSWORD"
+  qm_set_cloud_init_password "$VMID"
   unset PASSWORD
 fi
 
@@ -217,7 +218,7 @@ stage 'Optional VM startup'
 printf '\nSUCCESS: VM %s (%s) created.\n' "$VMID" "$OS_LABEL"
 printf 'Resources: %s vCPU, %s GiB RAM, %s GiB disk on %s\n' "$CORES" "$RAM_GIB" "$DISK_GIB" "$STORAGE"
 if ask_yes 'Start VM now' y; then
-  run_qm start "$VMID" || provisioning_failed "qm start"
+  qm_run "start VM ${VMID}" start "$VMID"
   printf 'VM started. Serial console: qm terminal %s\n' "$VMID"
 else
   printf 'VM left stopped. Start: qm start %s\n' "$VMID"

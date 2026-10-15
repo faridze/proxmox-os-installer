@@ -17,7 +17,10 @@ CFG="${QM_CFG:-/tmp/qm-mock.cfg}"
 printf '%s\n' "$*" >> "$LOG"
 case "$1" in
   config)
-    [[ -f "$CFG" ]] || exit 1
+    if [[ ! -f "$CFG" ]]; then
+      printf 'Configuration file does not exist\n' >&2
+      exit 2
+    fi
     cat "$CFG"
     exit 0
     ;;

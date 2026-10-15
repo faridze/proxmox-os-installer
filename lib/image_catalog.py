@@ -85,46 +85,84 @@ class UpstreamNetworkError(RuntimeError):
     """Transport failure reaching upstream (not an unsupported image)."""
 
 
-def _probe_url(url, timeout=20):
-    headers = {"User-Agent": "proxmox-os-installer/0.2.0"}
-    for method in ("HEAD", "GET"):
-        req = urllib.request.Request(url, method=method, headers=headers)
-        if method == "GET":
-            req.add_header("Range", "bytes=0-0")
-        try:
-            with urllib.request.urlopen(req, timeout=timeout) as resp:
-                return resp.status if method == "HEAD" else resp.status
-        except urllib.error.HTTPError as exc:
-            if exc.code in (405, 501) and method == "HEAD":
-                continue
+MAX_MANIFEST_BYTES = 2 * 1024 * 1024
+USER_AGENT = "proxmox-os-installer/0.2.0"
+
+
+def _head_url(url, timeout=20):
+    headers = {"User-Agent": USER_AGENT}
+    req = urllib.request.Request(url, method="HEAD", headers=headers)
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return resp.status
+    except urllib.error.HTTPError as exc:
+        if exc.code in (405, 501):
             return exc.code
-        except urllib.error.URLError as exc:
-            raise UpstreamNetworkError(str(exc.reason)) from exc
-    raise UpstreamNetworkError(f"cannot probe {url}")
+        return exc.code
+    except urllib.error.URLError as exc:
+        raise UpstreamNetworkError(str(exc.reason)) from exc
+
+
+def _download_manifest(url, timeout=20):
+    headers = {"User-Agent": USER_AGENT}
+    req = urllib.request.Request(url, headers=headers)
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            if resp.status >= 400:
+                return resp.status, None
+            data = resp.read(MAX_MANIFEST_BYTES + 1)
+            if len(data) > MAX_MANIFEST_BYTES:
+                raise ValueError("manifest exceeds size limit")
+            return resp.status, data
+    except urllib.error.HTTPError as exc:
+        return exc.code, None
+    except urllib.error.URLError as exc:
+        raise UpstreamNetworkError(str(exc.reason)) from exc
 
 
 def check_upstream(catalog_path):
+    import tempfile
+
     entries = load_catalog(catalog_path)
     failures = 0
-    for os_id, label, _user, base, image, manifest, algo in entries:
+    for os_id, _label, _user, base, image, manifest, algo in entries:
         manifest_url = f"{base}/{manifest}"
         image_url = f"{base}/{image}"
         try:
-            m_status = _probe_url(manifest_url)
-            i_status = _probe_url(image_url)
+            status, body = _download_manifest(manifest_url)
         except UpstreamNetworkError as exc:
             print(f"NETWORK {os_id}: {exc}")
             failures += 1
             continue
-        if m_status >= 400:
-            print(f"FAIL {os_id}: checksum manifest unavailable ({manifest_url}) HTTP {m_status}")
+        except ValueError as exc:
+            print(f"FAIL {os_id}: malformed manifest ({manifest_url}): {exc}")
+            failures += 1
+            continue
+        if status >= 400 or body is None:
+            print(f"FAIL {os_id}: checksum manifest HTTP {status} ({manifest_url})")
+            failures += 1
+            continue
+        try:
+            with tempfile.NamedTemporaryFile(delete=False) as tmp:
+                tmp.write(body)
+                tmp_path = tmp.name
+            find_digest(tmp_path, image, algo)
+            Path(tmp_path).unlink(missing_ok=True)
+        except (ValueError, OSError) as exc:
+            print(f"FAIL {os_id}: manifest digest for {image}: {exc}")
+            failures += 1
+            continue
+        try:
+            i_status = _head_url(image_url)
+        except UpstreamNetworkError as exc:
+            print(f"NETWORK {os_id}: image probe: {exc}")
             failures += 1
             continue
         if i_status >= 400:
-            print(f"FAIL {os_id}: image unavailable ({image_url}) HTTP {i_status}")
+            print(f"FAIL {os_id}: image HEAD HTTP {i_status} ({image_url})")
             failures += 1
             continue
-        print(f"OK   {os_id}: manifest and image reachable ({algo})")
+        print(f"OK   {os_id}: manifest digest verified; image URL reachable ({algo})")
     if failures:
         raise ValueError(f"{failures} upstream check(s) failed")
     return len(entries)

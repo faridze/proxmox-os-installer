@@ -32,6 +32,11 @@ jobs:
           sudo bash tests/test_provision.sh
           sudo bash tests/test_provision_flow.sh
           sudo bash tests/test_provision_failures.sh
+          sudo bash tests/test_credential_leak.sh
+      - name: ShellCheck
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq shellcheck
+          shellcheck -e SC1091 bin/proxmox-os-installer lib/common.sh lib/interactive.sh
       - name: Upstream check (network)
         run: |
           python3 lib/image_catalog.py check-upstream catalog/os-images.tsv || \

@@ -13,8 +13,15 @@ spec.loader.exec_module(preflight)
 
 class PreflightUnitTests(unittest.TestCase):
     def test_ssh_validate_ed25519(self):
-        key = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGexampleexampleexampleexampleexa test@host"
+        import base64
+
+        blob = base64.b64encode(b"x" * 32).decode()
+        key = f"ssh-ed25519 {blob} test@host"
         self.assertTrue(preflight.validate_ssh_pubkey_material(key).startswith("ssh-ed25519"))
+
+    def test_ssh_rejects_multiline(self):
+        with self.assertRaises(ValueError):
+            preflight.validate_ssh_pubkey_material("ssh-ed25519 AAA=\none")
 
     def test_ssh_rejects_garbage(self):
         with self.assertRaises(ValueError):

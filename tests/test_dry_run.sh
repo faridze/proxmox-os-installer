@@ -7,7 +7,7 @@ trap 'rm -rf "$TMP"' EXIT
 mkdir -p "$TMP/bin"
 cat > "$TMP/bin/qm" <<'EOF'
 #!/usr/bin/env bash
-case "$1" in config) exit 1;; *) echo 'Unexpected mutation via qm' >&2; exit 98;; esac
+case "$1" in config) printf 'does not exist\n' >&2; exit 2;; *) echo 'Unexpected mutation via qm' >&2; exit 98;; esac
 EOF
 cp "$REPO/tests/lib/mock_pvesm.sh" "$TMP/bin/pvesm"
 cat > "$TMP/bin/pvesh" <<'EOF'

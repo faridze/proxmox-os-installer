@@ -3,6 +3,7 @@
 import fcntl
 import os
 import sys
+from contextlib import contextmanager
 from pathlib import Path
 
 import importlib.util
@@ -24,19 +25,37 @@ def is_temp_in_progress(path: Path) -> bool:
     return any(path.name.startswith(prefix) for prefix in TEMP_PREFIXES)
 
 
-def lock_is_busy(lock_path: Path) -> bool:
+def resolve_cache_path(cache_dir: Path, name: str) -> Path:
+    root = cache_dir.resolve()
+    candidate = (root / name).resolve()
+    if not str(candidate).startswith(str(root) + os.sep) and candidate != root:
+        raise ValueError(f"refusing path outside cache: {name}")
+    return candidate
+
+
+class CacheLockBusy(OSError):
+    """Another process holds the cache lock."""
+
+
+@contextmanager
+def hold_cache_lock(lock_path: Path, blocking: bool = True):
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
     try:
-        fd = os.open(lock_path, os.O_RDWR)
+        flags = fcntl.LOCK_EX
+        if not blocking:
+            flags |= fcntl.LOCK_NB
         try:
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            fcntl.flock(fd, fcntl.LOCK_UN)
-            return False
+            fcntl.flock(fd, flags)
         except BlockingIOError:
-            return True
+            os.close(fd)
+            raise CacheLockBusy(f"lock busy: {lock_path.name}") from None
+        yield
+    finally:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_UN)
         finally:
             os.close(fd)
-    except OSError:
-        return True
 
 
 def human_size(num):
@@ -52,11 +71,28 @@ def human_size(num):
 
 def catalog_expected(catalog_path):
     entries = _catalog.load_catalog(catalog_path)
-    return {expected_cache_name(e[0], e[4]): e for e in entries}
+    by_file = {expected_cache_name(e[0], e[4]): e for e in entries}
+    by_os = {e[0]: e for e in entries}
+    return by_file, by_os
+
+
+def prune_reason(path: Path, expected_map: dict) -> str | None:
+    if is_temp_in_progress(path) or path.name.endswith(LOCK_SUFFIX):
+        return None
+    if path.name not in expected_map:
+        return "not listed in current catalog"
+    if path.stat().st_size == 0:
+        return "empty cache file"
+    return None
+
+
+def os_id_for_cache_file(filename: str, expected_map: dict) -> str | None:
+    entry = expected_map.get(filename)
+    return entry[0] if entry else None
 
 
 def list_cache(cache_dir, catalog_path):
-    expected = set(catalog_expected(catalog_path))
+    expected_map, _ = catalog_expected(catalog_path)
     cache_dir = Path(cache_dir)
     cache_dir.mkdir(parents=True, exist_ok=True)
     rows = []
@@ -66,7 +102,7 @@ def list_cache(cache_dir, catalog_path):
             continue
         size = p.stat().st_size
         total += size
-        status = "current" if p.name in expected else "obsolete"
+        status = "current" if p.name in expected_map else "obsolete"
         rows.append((p.name, size, status))
     print(f"Cache directory: {cache_dir}")
     print(f"Total cached image data: {human_size(total)}")
@@ -79,30 +115,43 @@ def list_cache(cache_dir, catalog_path):
     return 0
 
 
-def prune_cache(cache_dir, catalog_path, apply=False):
-    expected_map = catalog_expected(catalog_path)
-    cache_dir = Path(cache_dir)
-    candidates = []
+def collect_prune_candidates(cache_dir: Path, expected_map: dict) -> list[tuple[Path, str]]:
+    out = []
     for p in sorted(cache_dir.iterdir()):
-        if not p.is_file() or p.name.endswith(LOCK_SUFFIX) or is_temp_in_progress(p):
+        if not p.is_file():
             continue
-        os_id = None
-        for name, entry in expected_map.items():
-            if name == p.name:
-                os_id = entry[0]
-                break
-        if os_id:
-            lock_path = cache_dir / f"{os_id}.lock"
-            if lock_path.exists() and lock_is_busy(lock_path):
-                print(f"SKIP (active lock): {p.name}", file=sys.stderr)
-                continue
-        reason = None
-        if p.name not in expected_map:
-            reason = "not listed in current catalog"
-        elif p.stat().st_size == 0:
-            reason = "empty cache file"
+        reason = prune_reason(p, expected_map)
         if reason:
-            candidates.append((p, reason))
+            out.append((p, reason))
+    return out
+
+
+def delete_under_lock(cache_dir: Path, path: Path, expected_map: dict, reason: str) -> bool:
+    """Delete one cache file while holding the relevant provisioning lock."""
+    path = resolve_cache_path(cache_dir, path.name)
+    os_id = os_id_for_cache_file(path.name, expected_map)
+    lock_path = cache_dir / f"{os_id}.lock" if os_id else cache_dir / ".prune.lock"
+    try:
+        with hold_cache_lock(lock_path, blocking=False):
+            if not path.is_file():
+                return False
+            current_reason = prune_reason(path, expected_map)
+            if current_reason != reason:
+                return False
+            path.unlink()
+            return True
+    except CacheLockBusy:
+        return False
+    except OSError as exc:
+        print(f"SKIP {path.name}: {exc}", file=sys.stderr)
+        return False
+
+
+def prune_cache(cache_dir, catalog_path, apply=False):
+    expected_map, _ = catalog_expected(catalog_path)
+    cache_dir = Path(cache_dir).resolve()
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    candidates = collect_prune_candidates(cache_dir, expected_map)
 
     if not candidates:
         print("Nothing to prune.")
@@ -116,9 +165,14 @@ def prune_cache(cache_dir, catalog_path, apply=False):
     if not apply:
         print("Re-run with --yes to delete these files after explicit confirmation.")
         return 0
-    for p, _ in candidates:
-        p.unlink(missing_ok=True)
-    print("Prune complete.")
+
+    removed = 0
+    for p, reason in candidates:
+        if delete_under_lock(cache_dir, p, expected_map, reason):
+            removed += 1
+        else:
+            print(f"SKIP (busy or changed): {p.name}", file=sys.stderr)
+    print(f"Prune complete ({removed} file(s) removed).")
     return 0
 
 

@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 """Proxmox preflight checks (storage, bridges, VM IDs, images). No VM mutations."""
+import base64
+import binascii
 import json
 import re
 import subprocess
@@ -7,6 +9,19 @@ import sys
 from pathlib import Path
 
 THIN_TYPES = frozenset({"lvmthin", "zfspool", "rbd", "nfs"})
+
+FREE_VMID_HINTS = (
+    "does not exist",
+    "not exist",
+    "no such file",
+    "unable to find configuration",
+    "configuration file",
+    "not found",
+)
+
+
+class VmidAvailabilityError(RuntimeError):
+    """Cannot determine whether a VM ID is free (fail closed)."""
 
 
 def _run_json(cmd):
@@ -17,13 +32,23 @@ def _run_json(cmd):
         raise RuntimeError(f"command failed: {' '.join(cmd)} ({exc})") from exc
 
 
-def vmid_in_use(vmid):
+def vmid_availability(vmid):
+    """Return 'free', 'in_use', or raise VmidAvailabilityError when uncertain."""
+    if not str(vmid).isdigit():
+        raise VmidAvailabilityError("invalid VM ID")
     r = subprocess.run(
         ["qm", "config", str(vmid)],
         capture_output=True,
         text=True,
     )
-    return r.returncode == 0
+    if r.returncode == 0:
+        return "in_use"
+    text = f"{r.stderr or ''}\n{r.stdout or ''}".lower()
+    if any(hint in text for hint in FREE_VMID_HINTS):
+        return "free"
+    raise VmidAvailabilityError(
+        (r.stderr or r.stdout or "qm config failed").strip() or "qm config failed"
+    )
 
 
 def storage_rows():
@@ -152,14 +177,17 @@ def validate_image_against_disk(image_path, disk_gib):
 
 
 def validate_ssh_pubkey_material(text):
-    line = text.strip().splitlines()[0] if text.strip() else ""
-    if not line:
+    lines = [ln.strip() for ln in text.strip().splitlines() if ln.strip() and not ln.strip().startswith("#")]
+    if not lines:
         raise ValueError("empty SSH public key")
+    if len(lines) != 1:
+        raise ValueError("SSH public key must be a single line")
+    line = lines[0]
     parts = line.split()
     if len(parts) < 2:
         raise ValueError("SSH public key must be type and base64 blob")
     keytype = parts[0]
-    allowed = (
+    allowed_exact = (
         "ssh-ed25519",
         "ssh-rsa",
         "ecdsa-sha2-nistp256",
@@ -168,11 +196,19 @@ def validate_ssh_pubkey_material(text):
         "sk-ssh-ed25519@openssh.com",
         "sk-ecdsa-sha2-nistp256@openssh.com",
     )
-    if not any(keytype == a or keytype.startswith("ecdsa-sha2-") for a in allowed):
+    if keytype not in allowed_exact:
         raise ValueError(f"unsupported SSH key type: {keytype}")
     blob = parts[1]
     if not re.fullmatch(r"[A-Za-z0-9+/]+={0,2}", blob):
         raise ValueError("invalid SSH key base64 payload")
+    try:
+        raw = base64.b64decode(blob, validate=True)
+    except (ValueError, binascii.Error) as exc:
+        raise ValueError("invalid SSH key base64 payload") from exc
+    if keytype == "ssh-ed25519" and len(raw) < 32:
+        raise ValueError("ssh-ed25519 key material too short")
+    if keytype == "ssh-rsa" and len(raw) < 256:
+        raise ValueError("ssh-rsa key material too short")
     return line
 
 
@@ -194,7 +230,12 @@ def verify_vm_config(vmid, expect_scsi=True, expect_cloudinit=True):
 def main():
     try:
         if len(sys.argv) >= 3 and sys.argv[1] == "vmid-free":
-            sys.exit(1 if vmid_in_use(sys.argv[2]) else 0)
+            try:
+                state = vmid_availability(sys.argv[2])
+            except VmidAvailabilityError as exc:
+                print(f"ERROR: {exc}", file=sys.stderr)
+                sys.exit(2)
+            sys.exit(1 if state == "in_use" else 0)
         if len(sys.argv) >= 4 and sys.argv[1] == "storage-validate":
             result = validate_storage(sys.argv[2], int(sys.argv[3]))
             for w in result["warnings"]:

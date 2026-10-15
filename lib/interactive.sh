@@ -54,8 +54,16 @@ collect_auth() {
     if [[ -f "$SSH_PUBKEY" && -r "$SSH_PUBKEY" ]]; then
       python3 "$PREFLIGHT" ssh-validate-file "$SSH_PUBKEY" >/dev/null || error 'Invalid SSH public key file.'
     else
-      python3 "$PREFLIGHT" ssh-validate-line "$SSH_PUBKEY" > "$TMP_SSH" || error 'Invalid inline SSH public key.'
-      SSH_PUBKEY="$TMP_SSH"
+      if (( DRY_RUN == 1 )); then
+        python3 "$PREFLIGHT" ssh-validate-line "$SSH_PUBKEY" >/dev/null || error 'Invalid inline SSH public key.'
+        SSH_INLINE_VALIDATED=1
+        SSH_PUBKEY=""
+      else
+        TMP_SSH="$(mktemp)"
+        chmod 0600 "$TMP_SSH"
+        python3 "$PREFLIGHT" ssh-validate-line "$SSH_PUBKEY" > "$TMP_SSH" || error 'Invalid inline SSH public key.'
+        SSH_PUBKEY="$TMP_SSH"
+      fi
     fi
   fi
   PASSWORD_SET=0
@@ -77,7 +85,7 @@ print_summary() {
   printf '\n--------- VM SUMMARY ---------\n'
   printf 'OS: %s\nVM: %s (%s)\nCPU: %s\nRAM: %s GiB\nDisk: %s GiB @ %s\nNIC: %s\nIP: %s\nUser: %s\n' \
     "$OS_LABEL" "$VMID" "$NAME" "$CORES" "$RAM_GIB" "$DISK_GIB" "$STORAGE" "$NIC" "$IP_CONFIG" "$USERNAME"
-  if [[ -n "$SSH_PUBKEY" ]]; then
+  if [[ -n "$SSH_PUBKEY" || "${SSH_INLINE_VALIDATED:-0}" == 1 ]]; then
     printf 'SSH key: configured\n'
   else
     printf 'SSH key: none\n'
