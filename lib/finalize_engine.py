@@ -86,9 +86,8 @@ def qm_config(vmid: int) -> dict[str, str]:
 
 
 def qm_status(vmid: int) -> str:
-    mock = os.environ.get("PVEOSI_MOCK_QM_STATUS")
-    if mock:
-        return mock.strip()
+    if "PVEOSI_MOCK_QM_STATUS" in os.environ:
+        return os.environ["PVEOSI_MOCK_QM_STATUS"].strip()
     r = _run(["qm", "status", str(vmid)])
     if r.returncode != 0:
         raise FinalizeError(f"Cannot read VM {vmid} status.")
@@ -99,9 +98,8 @@ def qm_status(vmid: int) -> str:
 
 
 def qm_snapshots(vmid: int) -> list[str]:
-    mock = os.environ.get("PVEOSI_MOCK_QM_SNAPSHOTS")
-    if mock:
-        return [s for s in mock.split(",") if s]
+    if "PVEOSI_MOCK_QM_SNAPSHOTS" in os.environ:
+        return [s for s in os.environ["PVEOSI_MOCK_QM_SNAPSHOTS"].split(",") if s]
     r = _run(["qm", "listsnapshot", str(vmid)])
     if r.returncode != 0:
         return []
@@ -114,9 +112,8 @@ def qm_snapshots(vmid: int) -> list[str]:
 
 
 def list_vmids() -> list[int]:
-    mock = os.environ.get("PVEOSI_MOCK_ALL_VMIDS")
-    if mock:
-        return [int(x) for x in mock.split(",") if x.strip().isdigit()]
+    if "PVEOSI_MOCK_ALL_VMIDS" in os.environ:
+        return [int(x) for x in os.environ["PVEOSI_MOCK_ALL_VMIDS"].split(",") if x.strip().isdigit()]
     r = _run(["qm", "list"])
     if r.returncode != 0:
         return []
@@ -273,19 +270,17 @@ def validate_preconditions(ctx: VmContext) -> None:
             "Cannot establish pveosi ownership (missing tag 'pveosi' or matching pveosi snippet). "
             "Refusing to modify an unmanaged VM."
         )
+    for key, val in ctx.config.items():
+        if not key.startswith("ide"):
+            continue
+        if "cloudinit" in val:
+            continue
+        if "media=cdrom" in val or ".iso" in val:
+            raise FinalizeError(
+                f"{key} contains an ordinary CD-ROM or ISO, not a verified Cloud-Init drive."
+            )
     if ctx.cloudinit_ide is None and not any(k in ctx.config for k in CI_KEYS):
         return
-    for key, val in ctx.config.items():
-        if key.startswith("ide") and "cloudinit" not in val and key == ctx.cloudinit_ide:
-            raise FinalizeError(f"Cloud-Init device {key} is not a verified cloudinit drive.")
-    # Reject ordinary CD-ROM on ide2 without cloudinit marker.
-    if ctx.config.get("ide2") and "cloudinit" not in ctx.config.get("ide2", "") and "ide2" not in (
-        ctx.cloudinit_ide or ""
-    ):
-        if "media=cdrom" in ctx.config.get("ide2", "") and not ctx.cloudinit_ide:
-            raise FinalizeError(
-                "ide2 contains an ordinary CD-ROM, not a verified Cloud-Init drive; refusing to delete it."
-            )
 
 
 def print_guest_checklist() -> None:
