@@ -40,7 +40,7 @@ class SnippetCleanupTests(unittest.TestCase):
 
     def test_safe_delete(self):
         volid = "local:snippets/pveosi-501-user.yaml"
-        os.environ["PVEOSI_MOCK_SNIPPET_PATH"] = f"{volid}:{self.snip}"
+        os.environ["PVEOSI_MOCK_SNIPPET_PATHS"] = json.dumps({volid: str(self.snip)})
         self.cluster.write_text(json.dumps({"501": "tags: pveosi\n"}), encoding="utf-8")
         os.environ["PVEOSI_MOCK_CLUSTER_CONFIGS"] = str(self.cluster)
         plan = snippet.assess_snippet_cleanup(501, volid, [], self._refs)
@@ -51,7 +51,7 @@ class SnippetCleanupTests(unittest.TestCase):
     def test_missing_idempotent(self):
         volid = "local:snippets/pveosi-501-user.yaml"
         self.snip.unlink()
-        os.environ["PVEOSI_MOCK_SNIPPET_PATH"] = f"{volid}:{self.snip}"
+        os.environ["PVEOSI_MOCK_SNIPPET_PATHS"] = json.dumps({volid: str(self.snip)})
         os.environ["PVEOSI_MOCK_CLUSTER_CONFIGS"] = str(self.cluster)
         self.cluster.write_text("{}", encoding="utf-8")
         plan = snippet.assess_snippet_cleanup(501, volid, [], self._refs)
@@ -60,7 +60,7 @@ class SnippetCleanupTests(unittest.TestCase):
 
     def test_shared_snippet_refused(self):
         volid = "local:snippets/pveosi-501-user.yaml"
-        os.environ["PVEOSI_MOCK_SNIPPET_PATH"] = f"{volid}:{self.snip}"
+        os.environ["PVEOSI_MOCK_SNIPPET_PATHS"] = json.dumps({volid: str(self.snip)})
         cfg501 = f"tags: pveosi\ncicustom: user={volid}\n"
         cfg502 = f"cicustom: user={volid}\n"
         self.cluster.write_text(json.dumps({"501": cfg501, "502": cfg502}), encoding="utf-8")
@@ -71,13 +71,13 @@ class SnippetCleanupTests(unittest.TestCase):
 
     def test_foreign_snippet_refused(self):
         volid = "local:snippets/custom-user.yaml"
-        os.environ["PVEOSI_MOCK_SNIPPET_PATH"] = f"{volid}:{self.snip}"
+        os.environ["PVEOSI_MOCK_SNIPPET_PATHS"] = json.dumps({volid: str(self.snip)})
         plan = snippet.assess_snippet_cleanup(501, volid, [], lambda _v, _i: [])
         self.assertFalse(plan.safe_to_delete)
 
     def test_snapshot_refused(self):
         volid = "local:snippets/pveosi-501-user.yaml"
-        os.environ["PVEOSI_MOCK_SNIPPET_PATH"] = f"{volid}:{self.snip}"
+        os.environ["PVEOSI_MOCK_SNIPPET_PATHS"] = json.dumps({volid: str(self.snip)})
         os.environ["PVEOSI_MOCK_CLUSTER_CONFIGS"] = str(self.cluster)
         self.cluster.write_text("{}", encoding="utf-8")
         plan = snippet.assess_snippet_cleanup(501, volid, ["snap1"], self._refs)
@@ -87,7 +87,7 @@ class SnippetCleanupTests(unittest.TestCase):
         volid = "local:snippets/pveosi-501-user.yaml"
         link = Path(self.tmp) / "link.yaml"
         link.symlink_to(self.snip)
-        os.environ["PVEOSI_MOCK_SNIPPET_PATH"] = f"{volid}:{link}"
+        os.environ["PVEOSI_MOCK_SNIPPET_PATHS"] = json.dumps({volid: str(link)})
         os.environ["PVEOSI_MOCK_CLUSTER_CONFIGS"] = str(self.cluster)
         self.cluster.write_text("{}", encoding="utf-8")
         plan = snippet.assess_snippet_cleanup(501, volid, [], self._refs)
@@ -95,7 +95,7 @@ class SnippetCleanupTests(unittest.TestCase):
 
     def test_cluster_fail_refused(self):
         volid = "local:snippets/pveosi-501-user.yaml"
-        os.environ["PVEOSI_MOCK_SNIPPET_PATH"] = f"{volid}:{self.snip}"
+        os.environ["PVEOSI_MOCK_SNIPPET_PATHS"] = json.dumps({volid: str(self.snip)})
         os.environ["PVEOSI_MOCK_CLUSTER_FAIL"] = "1"
 
         def boom(_v, _i):

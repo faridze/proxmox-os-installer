@@ -2,6 +2,7 @@
 """Safe optional deletion of pveosi Cloud-Init snippet files after finalize."""
 from __future__ import annotations
 
+import json
 import os
 import re
 import subprocess
@@ -32,13 +33,18 @@ def _run(cmd: list[str]) -> subprocess.CompletedProcess[str]:
 
 
 def resolve_snippet_path(volid: str) -> str:
+    mock_json = os.environ.get("PVEOSI_MOCK_SNIPPET_PATHS")
+    if mock_json:
+        import json
+
+        store = json.loads(mock_json)
+        if volid in store:
+            return str(store[volid])
+        raise SnippetCleanupError(f"Cannot resolve snippet path for {volid}.")
     if "PVEOSI_MOCK_SNIPPET_PATH" in os.environ:
         mapping = os.environ["PVEOSI_MOCK_SNIPPET_PATH"]
-        if mapping.startswith("/") or ":" not in mapping:
+        if mapping.startswith("/"):
             return mapping
-        key, path = mapping.split(":", 1)
-        if key == volid:
-            return path
         raise SnippetCleanupError(f"Cannot resolve snippet path for {volid}.")
     r = _run(["pvesm", "path", volid])
     if r.returncode != 0:
