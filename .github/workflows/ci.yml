@@ -1,0 +1,20 @@
+name: CI
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  check:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check Bash syntax
+        run: bash -n bootstrap.sh install.sh bin/proxmox-os-installer tests/test_dry_run.sh
+      - name: Catalog and manifest tests
+        run: python3 -m unittest discover -s tests -v
+      - name: Dry-run mock (no VM created)
+        run: sudo bash tests/test_dry_run.sh
