@@ -84,6 +84,7 @@ export PATH="$TMP/bin:$PATH"
   printf '\n\n'
   printf 'n\n'
   printf 'pw\npw\n'
+  printf '\n'
   printf 'y\ny\n'
 } | "$REPO/bin/proxmox-os-installer" >"$TMP/out.txt" 2>&1
 
@@ -91,5 +92,6 @@ grep -q 'SUCCESS: VM 301' "$TMP/out.txt"
 grep -q '^create ' "$TMP/qm.log"
 grep -q 'import-from' "$TMP/qm.log"
 grep -q 'cloudinit' "$TMP/qm.log"
+grep -q -- '--vga serial0' "$TMP/qm.log"
 grep -q '^start ' "$TMP/qm.log"
 echo 'OK: full mocked provision command order'

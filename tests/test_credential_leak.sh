@@ -71,6 +71,7 @@ EOF
     printf '\n\n'
     printf 'n\n'
     printf '%s\n%s\n' "$SECRET" "$SECRET"
+    printf '\n'
     printf 'y\n'
   } | "$REPO/bin/proxmox-os-installer" >"$LOG" 2>&1 || true
 

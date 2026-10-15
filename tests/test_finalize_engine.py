@@ -135,7 +135,7 @@ class FinalizeEngineTests(unittest.TestCase):
             finalize.load_context(501)
         self.assertIn("snapshots", str(ctx_err.exception).lower())
 
-    def test_shared_snippet_blocks_execute(self):
+    def test_shared_snippet_blocks_cleanup_not_finalize(self):
         snippet = "local:snippets/pveosi-501-user.yaml"
         cfg501 = (
             "name: test\n"
@@ -151,8 +151,11 @@ class FinalizeEngineTests(unittest.TestCase):
         plan = finalize.build_plan(ctx, guest_attested=True)
         self.assertTrue(plan.snippet_blockers)
         self.assertTrue(any("502" in b for b in plan.snippet_blockers))
-        with self.assertRaises(finalize.FinalizeError):
-            finalize.execute_plan(ctx, plan)
+        os.environ["PVEOSI_MOCK_STATEFUL"] = "1"
+        os.environ["PVEOSI_MOCK_SKIP_SNIPPET_CLEANUP"] = "1"
+        finalize.execute_plan(ctx, plan, guest_attested=True)
+        self.cfg.write_text(finalize._config_dict_to_text(finalize.qm_config(501)), encoding="utf-8")
+        self.assertNotIn("cicustom", finalize.qm_config(501))
 
     def test_cluster_query_failure_not_treated_as_empty(self):
         self._write_cfg(

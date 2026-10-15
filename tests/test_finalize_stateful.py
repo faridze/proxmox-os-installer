@@ -58,6 +58,7 @@ class StatefulFinalizeTests(unittest.TestCase):
         os.environ["PVEOSI_MOCK_QM_STATUS_FILE"] = str(self.status_file)
         os.environ["PVEOSI_MOCK_QM_SNAPSHOTS_FILE"] = str(self.snap_file)
         os.environ["PVEOSI_FINALIZE_ALLOW_NONROOT"] = "1"
+        os.environ["PVEOSI_MOCK_SKIP_SNIPPET_CLEANUP"] = "1"
         snippet = "local:snippets/pveosi-501-user.yaml"
         self.cluster.write_text(
             json.dumps({"501": _base_config()}),

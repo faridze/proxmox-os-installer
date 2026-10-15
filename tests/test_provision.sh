@@ -54,6 +54,7 @@ inputs_default() {
   printf '\n\n'
   printf 'n\n'
   printf 'pw\npw\n'
+  printf '\n'
 }
 
 run_dry() {
@@ -106,5 +107,23 @@ if inputs_default | "$REPO/bin/proxmox-os-installer" --dry-run 2>"$TMP/storage.e
   echo 'expected storage preflight failure' >&2; exit 1
 fi
 grep -qi 'storage' "$TMP/storage.err"
+
+base_mocks
+run_dry serial
+grep -q 'Console: serial' "$TMP/out-serial.txt"
+
+inputs_vga() {
+  printf '1\n1\n'
+  for _ in {1..5}; do printf '\n'; done
+  for _ in {1..4}; do printf '\n'; done
+  printf '\n\n'
+  printf 'n\n'
+  printf 'pw\npw\n'
+  printf '2\n\n'
+}
+QM_LOG="$TMP/qm-vga.log"
+inputs_vga | "$REPO/bin/proxmox-os-installer" --dry-run >"$TMP/out-vga.txt" 2>&1
+grep -q 'Console: vga' "$TMP/out-vga.txt"
+grep -q 'Graphical login is not verified' "$TMP/out-vga.txt"
 
 echo 'OK: provision mock tests'

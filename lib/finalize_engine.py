@@ -22,6 +22,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional
 
+_LIB_DIR = Path(__file__).resolve().parent
+if str(_LIB_DIR) not in sys.path:
+    sys.path.insert(0, str(_LIB_DIR))
+from snippet_cleanup import SnippetCleanupError, assess_snippet_cleanup, execute_snippet_cleanup
+
 PVEOSI_TAG = "pveosi"
 CI_KEY_EXACT = frozenset(
     {
@@ -88,12 +93,88 @@ class FinalizePlan:
     already_finalized: bool = False
 
 
+@dataclass
+class FinalizeResult:
+    vmid: int
+    host_finalize_ok: bool
+    snippet_volid: Optional[str]
+    snippet_status: str
+    guest_attested: bool
+
+
+def describe_display_type(config: dict[str, str]) -> str:
+    vga = (config.get("vga") or "std").lower()
+    if vga in ("serial0", "serial"):
+        return "serial"
+    if vga == "std":
+        return "standard"
+    return "other"
+
+
+def describe_serial_port(config: dict[str, str]) -> str:
+    return "present" if config.get("serial0") else "absent"
+
+
+def _ci_backing_volume_status(vmid: int, config: dict[str, str]) -> str:
+    if _find_cloudinit_ide(vmid, config)[0]:
+        return "attached"
+    unused = _unused_cloudinit_entries(config, vmid)
+    if unused:
+        return "retained (unused entry)"
+    return "unknown (not attached; may remain on storage)"
+
+
+def print_finalize_status_report(
+    vmid: int,
+    config: dict[str, str],
+    *,
+    host_finalize_ok: bool,
+    snippet_status: str,
+    guest_attested: bool,
+    gfx_verified: str = "not verified",
+    ssh_verified: str = "not verified",
+) -> None:
+    ci_keys = _cloudinit_config_keys(config)
+    ide_attached = _find_cloudinit_ide(vmid, config)[0]
+    print("\n--- Finalization status (host) ---")
+    print(f"  Cloud-Init device:     {'attached' if ide_attached else 'detached / not detected'}")
+    if ci_keys or ide_attached:
+        print("  Cloud-Init config:     incomplete")
+    else:
+        print("  Cloud-Init config:     removed")
+    print(f"  Cloud-Init volume:     {_ci_backing_volume_status(vmid, config)}")
+    print(f"  Snippet file:          {snippet_status}")
+    print(
+        f"  Guest CI disabled:     {'operator-attested' if guest_attested else 'unknown'}"
+    )
+    print(f"  Display:               {describe_display_type(config)}")
+    print(f"  Serial Port:           {describe_serial_port(config)}")
+    print(f"  SSH verified:          {ssh_verified}")
+    print(f"  Graphical console:     {gfx_verified}")
+    if host_finalize_ok and (ide_attached or ci_keys or snippet_status == "retained"):
+        print(
+            "  Sensitive-data note:   host cleanup incomplete — snippet or Cloud-Init "
+            "artifacts may remain."
+        )
+    print("---")
+    print(f"Optional console adjustment: pveosi console {vmid} --dry-run")
+    print()
+
+
 def _run_subprocess(cmd: list[str]) -> subprocess.CompletedProcess[str]:
     return subprocess.run(cmd, capture_output=True, text=True)
 
 
 def _config_dict_to_text(cfg: dict[str, str]) -> str:
     return "\n".join(f"{k}: {v}" for k, v in sorted(cfg.items())) + "\n"
+
+
+def _mock_stateful_qm_set_vga(vmid: str, vga: str) -> subprocess.CompletedProcess[str]:
+    path = Path(os.environ["PVEOSI_MOCK_QM_CONFIG"])
+    cfg = _parse_config_text(path.read_text(encoding="utf-8"))
+    cfg["vga"] = vga
+    path.write_text(_config_dict_to_text(cfg), encoding="utf-8")
+    return subprocess.CompletedProcess(["qm", "set", vmid, "--vga", vga], 0, "", "")
 
 
 def _mock_stateful_qm_set_delete(vmid: str, key: str) -> subprocess.CompletedProcess[str]:
@@ -114,10 +195,14 @@ def _mock_stateful_qm_set_delete(vmid: str, key: str) -> subprocess.CompletedPro
 
 
 def _run(cmd: list[str]) -> subprocess.CompletedProcess[str]:
-    if os.environ.get("PVEOSI_MOCK_STATEFUL") == "1" and len(cmd) >= 5:
-        if cmd[0] == "qm" and cmd[1] == "set" and "--delete" in cmd:
-            key = cmd[cmd.index("--delete") + 1]
-            return _mock_stateful_qm_set_delete(cmd[2], key)
+    if os.environ.get("PVEOSI_MOCK_STATEFUL") == "1" and len(cmd) >= 4:
+        if cmd[0] == "qm" and cmd[1] == "set":
+            if "--delete" in cmd:
+                key = cmd[cmd.index("--delete") + 1]
+                return _mock_stateful_qm_set_delete(cmd[2], key)
+            if "--vga" in cmd:
+                vga = cmd[cmd.index("--vga") + 1]
+                return _mock_stateful_qm_set_vga(cmd[2], vga)
     return _run_subprocess(cmd)
 
 
@@ -643,7 +728,7 @@ def print_preview(plan: FinalizePlan, dry_run: bool) -> None:
         print(f"  CI volume:   {plan.cloudinit_spec}")
     print(f"  Remove keys: {', '.join(plan.config_keys_to_remove) or 'none'}")
     print(f"  Snippet:     {plan.snippet_ref or 'none'}")
-    print("  Snippet del: manual only (automatic deletion disabled in this release)")
+    print("  Snippet del: optional after host finalization (separate confirmation)")
     if plan.snippet_blockers:
         print(f"  Snippet note: {'; '.join(plan.snippet_blockers)}")
     if plan.snapshot_blockers:
@@ -661,14 +746,65 @@ def print_preview(plan: FinalizePlan, dry_run: bool) -> None:
     print()
 
 
-def execute_plan(ctx: VmContext, plan: FinalizePlan) -> None:
+def _offer_snippet_cleanup(
+    vmid: int,
+    snippet_volid: str,
+    snapshots: list[str],
+    plan_blockers: list[str],
+) -> str:
+    if os.environ.get("PVEOSI_MOCK_SKIP_SNIPPET_CLEANUP") == "1":
+        return "retained"
+    if plan_blockers:
+        print("Snippet cleanup skipped:")
+        for b in plan_blockers:
+            print(f"  - {b}")
+        print("Remove the snippet manually only after verifying no cluster VM references remain.")
+        return "retained"
+    assessment = assess_snippet_cleanup(
+        vmid, snippet_volid, snapshots, _snippet_references_elsewhere
+    )
+    if not assessment.safe_to_delete:
+        print("Snippet cleanup refused:")
+        for b in assessment.blockers:
+            print(f"  - {b}")
+        return "retained"
+    if assessment.already_absent:
+        print(f"Snippet not found on storage (already removed): {snippet_volid}")
+        return "not found"
+    print("Optional snippet file cleanup (host storage only; not secure erase):")
+    print(f"  Volume: {snippet_volid}")
+    print(f"  Path:   {assessment.host_path}")
+    print("  Contents are not shown (may contain password hashes).")
+    confirm = input("Delete this snippet file now? (yes/no): ").strip().lower()
+    if confirm not in ("yes", "y"):
+        print("Snippet retained.")
+        return "retained"
+    try:
+        status = execute_snippet_cleanup(assessment)
+        return status
+    except SnippetCleanupError as exc:
+        print(f"Snippet cleanup failed: {exc}")
+        return "retained"
+
+
+def execute_plan(ctx: VmContext, plan: FinalizePlan, guest_attested: bool = False) -> FinalizeResult:
+    snippet_volid = ctx.cicustom_user
     if plan.snapshot_blockers:
         raise FinalizeError(f"Cannot finalize: {'; '.join(plan.snapshot_blockers)}")
     if plan.already_finalized:
         print("Already finalized; no host changes applied.")
-        return
-    if plan.snippet_blockers:
-        raise FinalizeError(f"Snippet reference is ambiguous: {'; '.join(plan.snippet_blockers)}")
+        cfg = qm_config(ctx.vmid)
+        sn_stat = "n/a"
+        if snippet_volid:
+            sn_stat = "retained"
+        print_finalize_status_report(
+            ctx.vmid,
+            cfg,
+            host_finalize_ok=True,
+            snippet_status=sn_stat,
+            guest_attested=guest_attested,
+        )
+        return FinalizeResult(ctx.vmid, True, snippet_volid, sn_stat, guest_attested)
 
     before_config = dict(ctx.config)
     remaining_ci_keys = set(plan.config_keys_to_remove)
@@ -716,14 +852,23 @@ def execute_plan(ctx: VmContext, plan: FinalizePlan) -> None:
     except FinalizeError:
         raise
 
-    if plan.snippet_ref:
-        print(
-            "Snippet file retention: delete manually on the snippets storage only after verifying "
-            f"no VM references remain: {plan.snippet_ref}"
+    print("Cloud-Init host finalization completed.")
+    snippet_status = "n/a"
+    if snippet_volid:
+        fresh_snaps = qm_snapshots(ctx.vmid)
+        snippet_status = _offer_snippet_cleanup(
+            ctx.vmid, snippet_volid, fresh_snaps, plan.snippet_blockers
         )
-
-    print("Finalization completed on the Proxmox host.")
+    after_cfg = qm_config(ctx.vmid)
+    print_finalize_status_report(
+        ctx.vmid,
+        after_cfg,
+        host_finalize_ok=True,
+        snippet_status=snippet_status,
+        guest_attested=guest_attested,
+    )
     print("Boot the guest and verify SSH, password, and networking before deleting backups.")
+    return FinalizeResult(ctx.vmid, True, snippet_volid, snippet_status, guest_attested)
 
 
 def cmd_finalize(argv: list[str]) -> int:
@@ -766,7 +911,7 @@ def cmd_finalize(argv: list[str]) -> int:
         if confirm not in ("yes", "y"):
             print("Cancelled.")
             return 0
-        execute_plan(ctx, plan)
+        execute_plan(ctx, plan, guest_attested=True)
     except FinalizeError as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 1

@@ -44,6 +44,8 @@ REQUIRED_SOURCE = (
     "lib/ssh_access.py",
     "lib/update_engine.py",
     "lib/finalize_engine.py",
+    "lib/console_engine.py",
+    "lib/snippet_cleanup.py",
     "lib/common.sh",
     "lib/interactive.sh",
     "lib/install_aliases.sh",
@@ -60,6 +62,8 @@ REQUIRED_INSTALLED = (
     "lib/ssh_access.py",
     "lib/update_engine.py",
     "lib/finalize_engine.py",
+    "lib/console_engine.py",
+    "lib/snippet_cleanup.py",
     "lib/common.sh",
     "lib/interactive.sh",
     "lib/install_aliases.sh",
@@ -73,6 +77,8 @@ PY_LIBS = (
     "ssh_access.py",
     "update_engine.py",
     "finalize_engine.py",
+    "console_engine.py",
+    "snippet_cleanup.py",
 )
 SH_LIBS = ("common.sh", "interactive.sh", "install_aliases.sh", "snippets_guidance.sh")
 

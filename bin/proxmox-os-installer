@@ -8,6 +8,7 @@ SELF="$(readlink -f -- "${BASH_SOURCE[0]}")"
 ROOT="$(cd -- "$(dirname -- "$SELF")/.." && pwd -P)"
 UPDATE_ENGINE="${ROOT}/lib/update_engine.py"
 FINALIZE_ENGINE="${ROOT}/lib/finalize_engine.py"
+CONSOLE_ENGINE="${ROOT}/lib/console_engine.py"
 CATALOG="${ROOT}/catalog/os-images.tsv"
 CHECKER="${ROOT}/lib/image_catalog.py"
 PREFLIGHT="${ROOT}/lib/preflight.py"
@@ -70,6 +71,9 @@ case "${1:-}" in
   finalize)
     exec python3 "$FINALIZE_ENGINE" finalize "${@:2}"
     ;;
+  console)
+    exec python3 "$CONSOLE_ENGINE" console "${@:2}"
+    ;;
   --version) printf '%s\n' "$VERSION"; exit 0 ;;
   --list-os)
     python3 "$CHECKER" catalog-check "$CATALOG" >/dev/null || exit 1
@@ -89,7 +93,7 @@ case "${1:-}" in
     ;;
   --dry-run) DRY_RUN=1 ;;
   '') ;;
-  *) error 'Usage: proxmox-os-installer [update|finalize <VMID> [--dry-run]|--version|--list-os|--check-catalog|--check-upstream|--cache-list|--cache-prune|--dry-run]' ;;
+  *) error 'Usage: proxmox-os-installer [update|finalize <VMID> [--dry-run]|console <VMID> [--dry-run] [--remove-serial]|--version|--list-os|--check-catalog|--check-upstream|--cache-list|--cache-prune|--dry-run]' ;;
 esac
 
 (( EUID == 0 )) || error 'Run as root on a Proxmox VE node.'
@@ -156,6 +160,7 @@ PY
 esac
 
 collect_auth
+pick_console_mode
 print_summary
 
 if [[ "$DRY_RUN" == 1 ]]; then
@@ -217,9 +222,13 @@ python3 "$PREFLIGHT" image-validate "$CACHED_IMAGE" "$DISK_GIB" >/dev/null || \
 assert_vmid_free
 
 stage 'VM creation'
+CREATE_EXTRA=()
+if [[ -n "${SERIAL0_MODE:-}" ]]; then
+  CREATE_EXTRA+=(--serial0 "$SERIAL0_MODE")
+fi
 qm_run "create VM ${VMID}" create "$VMID" --name "$VM_NAME" --cores "$CORES" --cpu host \
   --memory "$RAM_MIB" --net0 "$NIC" --scsihw virtio-scsi-single \
-  --serial0 socket --vga serial0 --agent enabled=1 --ostype l26
+  "${CREATE_EXTRA[@]}" --vga "$VGA_MODE" --agent enabled=1 --ostype l26
 CREATED=1
 
 stage 'Disk import and resize'
@@ -273,7 +282,12 @@ printf '\nSUCCESS: VM %s (%s) created.\n' "$VMID" "$OS_LABEL"
 printf 'Resources: %s vCPU, %s GiB RAM, %s GiB disk on %s\n' "$CORES" "$RAM_GIB" "$DISK_GIB" "$STORAGE"
 if ask_yes 'Start VM now' y; then
   qm_run "start VM ${VMID}" start "$VMID"
-  printf 'VM started. Serial console: qm terminal %s\n' "$VMID"
+  if [[ "${CONSOLE_MODE:-serial}" == vga ]]; then
+    printf 'VM started. Graphical console: open noVNC in the Proxmox UI (VM %s).\n' "$VMID"
+    [[ -n "${SERIAL0_MODE:-}" ]] && printf 'Serial fallback: qm terminal %s\n' "$VMID"
+  else
+    printf 'VM started. Serial console: qm terminal %s\n' "$VMID"
+  fi
 else
   printf 'VM left stopped. Start: qm start %s\n' "$VMID"
 fi

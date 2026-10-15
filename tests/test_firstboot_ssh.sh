@@ -99,6 +99,7 @@ inputs() {
   printf 'y\ny\ny\n' # SSH password login; switch to root; allow root SSH
   printf '\n' # snippets storage: local
   printf 'LOCAL_TEST_PASSWORD\nLOCAL_TEST_PASSWORD\n'
+  printf '\n'
   printf 'y\nn\n' # create VM; do not start
 }
 inputs | "$REPO/bin/proxmox-os-installer" >"$TMP/console.log" 2>&1

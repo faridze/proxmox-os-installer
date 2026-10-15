@@ -144,6 +144,7 @@ inputs_local() {
   printf '\n\n'
   printf 'y\ny\ny\n\n'
   printf 'PW_LOCAL\nPW_LOCAL\n'
+  printf '\n'
   printf 'y\nn\n'
 }
 inputs_local | "$REPO/bin/proxmox-os-installer" >"$TMP/local.log" 2>&1 || true
@@ -164,6 +165,7 @@ inputs_nfs() {
   printf 'y\ny\ny\n'
   printf 'nfs-store\n'
   printf 'PW_NFS\nPW_NFS\n'
+  printf '\n'
   printf 'y\nn\n'
 }
 inputs_nfs | "$REPO/bin/proxmox-os-installer" >"$TMP/nfs.log" 2>&1 || true
@@ -195,6 +197,7 @@ inputs_key_dry() {
   for _ in {1..4}; do printf '\n'; done
   printf 'debian\n%s\n' "$KEYFILE"
   printf 'n\n'
+  printf '\n'
 }
 inputs_key_dry | "$REPO/bin/proxmox-os-installer" --dry-run >"$TMP/dry.log" 2>&1 || true
 unset DRY_RUN

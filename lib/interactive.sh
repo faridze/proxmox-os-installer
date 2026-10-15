@@ -41,6 +41,31 @@ pick_storage() {
   fi
 }
 
+pick_console_mode() {
+  printf '\nProxmox console (Display settings):\n'
+  printf '  1) Serial console — current cloud-image default (qm terminal / serial0)\n'
+  printf '  2) Standard VGA — Proxmox noVNC graphical console\n'
+  local pick
+  pick="$(ask 'Select console mode' '1')"
+  case "$pick" in
+    1)
+      export CONSOLE_MODE=serial VGA_MODE=serial0 SERIAL0_MODE=socket
+      ;;
+    2)
+      export CONSOLE_MODE=vga VGA_MODE=std
+      printf '%s\n' 'Note: many Debian/Ubuntu cloud images print boot/login to serial only.'
+      printf '%s\n' 'Standard VGA may stay blank without extra guest configuration.'
+      printf '%s\n' 'Graphical login is not verified by this installer.'
+      if ask_yes 'Keep Serial Port 0 for troubleshooting (recommended)' y; then
+        export SERIAL0_MODE=socket
+      else
+        export SERIAL0_MODE=
+      fi
+      ;;
+    *) error 'Invalid console mode.' ;;
+  esac
+}
+
 pick_bridge() {
   local default
   default="$(python3 "$PREFLIGHT" default-bridge 2>/dev/null || printf 'vmbr0')"
@@ -157,6 +182,7 @@ print_summary() {
   else
     printf 'SSH key: none\n'
   fi
+  printf 'Console: %s\n' "${CONSOLE_MODE:-serial}"
   printf 'Password set: %s\n' "$PASSWORD_SET"
   if (( SSH_PASSWORD_LOGIN == 1 )); then
     printf 'SSH password login: YES (first boot only; snippets: %s)\n' "$SNIPPET_STORAGE"
