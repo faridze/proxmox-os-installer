@@ -28,12 +28,15 @@ Re-run the bootstrap (after reviewing upstream changes), or from a git checkout:
 
 ```bash
 cd proxmox-os-installer && sudo ./install.sh
+# Prints the selected command (pveosi, pve-osi, or proxmox-os-installer only).
 ```
 
 ## Create a VM
 
+After installation, prefer the short command **`pveosi`** (or **`pve-osi`** if `pveosi` is already taken on your node). The original **`proxmox-os-installer`** name remains available.
+
 ```bash
-proxmox-os-installer
+pveosi
 ```
 
 The wizard uses a **two-level OS menu** (distribution, then version), then prompts for VM ID/name, CPU, memory, disk, storage, bridge, optional VLAN, DHCP or static IPv4, DNS, cloud-init user, and SSH public key (preferred) or optional login password. Defaults: **8 vCPU, 24 GiB RAM, 150 GiB disk**, **`local-lvm`** when available, **`vmbr0`** when present. Active storages and bridges are discovered from the node where possible.
@@ -42,15 +45,18 @@ An explicit confirmation is required before any download or VM creation.
 
 ### Commands
 
+`pveosi` is installed when the name is free on your system. If another program already provides `pveosi`, the installer uses `pve-osi` instead. If both short names are taken, only `proxmox-os-installer` is linked.
+
 ```bash
-proxmox-os-installer                 # interactive provisioning
-proxmox-os-installer --dry-run       # validate inputs; no download/VM changes
-proxmox-os-installer --list-os       # flat OS list
-proxmox-os-installer --check-catalog # validate local catalog file
-proxmox-os-installer --check-upstream # probe official manifest/image URLs (no full image download)
-proxmox-os-installer --cache-list    # list checksum-verified cache files and usage
-proxmox-os-installer --cache-prune     # preview obsolete cache entries; confirm before delete
-proxmox-os-installer --version
+pveosi                              # interactive provisioning (preferred)
+pveosi --dry-run                    # validate inputs; no download/VM changes
+pveosi --list-os                    # flat OS list
+pveosi --check-catalog              # validate local catalog file
+pveosi --check-upstream             # probe official manifest/image URLs (no full image download)
+pveosi --cache-list                 # list checksum-verified cache files and usage
+pveosi --cache-prune                # preview obsolete cache entries; confirm before delete
+pveosi --version
+# Equivalent: pve-osi … or proxmox-os-installer …
 ```
 
 ## Supported OS versions

@@ -19,7 +19,9 @@ jobs:
           bash -n bootstrap.sh install.sh bin/proxmox-os-installer
           bash -n tests/test_dry_run.sh tests/test_provision.sh tests/test_provision_flow.sh tests/test_provision_failures.sh tests/test_credential_leak.sh
       - name: ShellCheck
-        run: shellcheck -e SC1091 bin/proxmox-os-installer lib/common.sh lib/interactive.sh
+        run: shellcheck -e SC1091 bin/proxmox-os-installer install.sh lib/common.sh lib/interactive.sh lib/install_aliases.sh
+      - name: Install alias collision tests
+        run: bash tests/test_install_aliases.sh
       - name: Python unit tests
         run: python3 -m unittest discover -s tests -p 'test_*.py' -v
       - name: Dry-run mock (no VM created)
