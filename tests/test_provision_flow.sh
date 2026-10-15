@@ -82,7 +82,7 @@ export PATH="$TMP/bin:$PATH"
   for _ in {1..5}; do printf '\n'; done
   for _ in {1..4}; do printf '\n'; done
   printf '\n\n'
-  printf 'pw\npw\n'
+  printf 'pw\npw\nn\n'
   printf 'y\ny\n'
 } | "$REPO/bin/proxmox-os-installer" >"$TMP/out.txt" 2>&1
 

@@ -70,7 +70,7 @@ EOF
     for _ in {1..4}; do printf '\n'; done
     printf '\n\n'
     printf '%s\n%s\n' "$SECRET" "$SECRET"
-    printf 'y\n'
+    printf 'n\ny\n'
   } | "$REPO/bin/proxmox-os-installer" >"$LOG" 2>&1 || true
 
   local leaked=0

@@ -70,7 +70,9 @@ collect_auth() {
     fi
   fi
   PASSWORD_SET=0
-  if [[ -z "$SSH_PUBKEY" ]] || ask_yes 'Also set console login password' n; then
+  SSH_PASSWORD_LOGIN=0
+  ROOT_PASSWORD_LOGIN=0
+  if [[ -z "$SSH_PUBKEY" && "$SSH_INLINE_VALIDATED" == 0 ]] || ask_yes 'Also set console login password' n; then
     PASSWORD_SET=1
     read -rsp 'Login password: ' PASSWORD || error 'Input cancelled.'
     printf '\n'
@@ -81,7 +83,47 @@ collect_auth() {
     unset PASSWORD_CONFIRM
     printf 'Note: password may appear briefly in process listings while being applied; SSH keys are preferred.\n'
     printf 'Note: many cloud images disable password-based SSH; console/VNC may still work.\n'
+    local ssh_default=n
+    if [[ -z "$SSH_PUBKEY" && "$SSH_INLINE_VALIDATED" == 0 ]]; then ssh_default=y; fi
+    if ask_yes 'Enable SSH password login at FIRST BOOT (requires snippets storage)' "$ssh_default"; then
+      SSH_PASSWORD_LOGIN=1
+      if [[ "$USERNAME" != root ]]; then
+        if ask_yes 'Use root instead of the chosen user for SSH password login (changes cloud-init account)' n; then
+          USERNAME=root
+        fi
+      fi
+      if [[ "$USERNAME" == root ]]; then
+        if ask_yes 'Allow direct root SSH login with password (higher security risk)' n; then
+          ROOT_PASSWORD_LOGIN=1
+        else
+          printf 'Direct root password SSH was not enabled. Console password remains available.\n'
+          SSH_PASSWORD_LOGIN=0
+        fi
+      fi
+      if (( SSH_PASSWORD_LOGIN == 1 )); then
+        pick_snippet_storage
+      fi
+    fi
   fi
+}
+
+pick_snippet_storage() {
+  local -a candidates=()
+  local entry default=""
+  mapfile -t candidates < <(pvesm status --content snippets 2>/dev/null | awk 'NR>1 && $3=="active" {print $1}')
+  if (( ${#candidates[@]} == 0 )); then
+    error 'Password SSH needs snippets storage. Enable snippets content on an active directory/NFS storage (Datacenter -> Storage), then rerun.'
+  fi
+  printf 'Storages supporting Cloud-Init snippets: %s\n' "${candidates[*]}"
+  default="${candidates[0]}"
+  for entry in "${candidates[@]}"; do
+    if [[ "$entry" == local ]]; then default=local; break; fi
+  done
+  SNIPPET_STORAGE="$(ask 'Storage for persistent Cloud-Init user-data snippet' "$default")"
+  for entry in "${candidates[@]}"; do
+    if [[ "$SNIPPET_STORAGE" == "$entry" ]]; then return 0; fi
+  done
+  error 'Selected snippets storage is not active or does not support snippets.'
 }
 
 print_summary() {
@@ -94,5 +136,11 @@ print_summary() {
     printf 'SSH key: none\n'
   fi
   printf 'Password set: %s\n' "$PASSWORD_SET"
+  if (( SSH_PASSWORD_LOGIN == 1 )); then
+    printf 'SSH password login: YES (first boot only; snippets: %s)\n' "$SNIPPET_STORAGE"
+    printf 'Root password SSH login: %s\n' "$([[ "$ROOT_PASSWORD_LOGIN" == 1 ]] && printf YES || printf NO)"
+  else
+    printf 'SSH password login: not enabled by installer\n'
+  fi
   printf '%s\n' '------------------------------'
 }

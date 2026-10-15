@@ -15,7 +15,7 @@ python3 "$REPO/lib/image_catalog.py" catalog-check "$REPO/catalog/os-images.tsv"
 install -d -m 0755 "$TARGET"/{bin,catalog,lib} /usr/local/sbin
 install -m 0755 "$REPO/bin/proxmox-os-installer" "$PVEOSI_PROJECT_BIN"
 install -m 0644 "$REPO/catalog/os-images.tsv" "$TARGET/catalog/os-images.tsv"
-for py in image_catalog.py preflight.py cache_ops.py; do
+for py in image_catalog.py preflight.py cache_ops.py ssh_access.py; do
   install -m 0644 "$REPO/lib/$py" "$TARGET/lib/$py"
 done
 for sh in common.sh interactive.sh install_aliases.sh; do

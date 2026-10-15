@@ -130,3 +130,13 @@ CI uses mocked `qm`/`pvesm` and **does not create real VMs**.
 See [docs/MANUAL_VALIDATION.md](docs/MANUAL_VALIDATION.md) for the per-OS matrix and checklist.
 
 License: MIT.
+
+## Password SSH / optional root login (experimental v0.2.2)
+
+For **new VMs before their first boot**, the wizard can enable SSH password login if a password was provided. It prompts explicitly before allowing **direct root SSH password login**, which switches the Cloud-Init login account to `root` and uses the selected login password. Use this only on restricted/trusted management networks. SSH keys remain the preferred approach.
+
+This opt-in feature requires an active Proxmox storage supporting **snippets** (e.g., enable the `Snippets` content type on the `local` directory storage under Datacenter > Storage). It is **separate** from the VM disk storage (`local-lvm` cannot store snippet files). The tool refuses to create the VM if the requested snippet storage cannot be resolved. It creates a private `pveosi-VMID-user.yaml` file, preserving Proxmox-generated hostname, user, password and SSH key settings, then attaches it via `qm set --cicustom user=...`. The snippet must remain available on the VM's node, including after migration.
+
+Cloud-Init normally applies first-boot user-data **once per instance**. This feature does not change SSH settings of an already booted VM; use its guest console/SSH access to adjust existing installations. Successful configuration does not guarantee guest-side success until verified after boot. `qm cloudinit dump VMID user` may show the Proxmox-generated config, not the attached custom snippet; inspect the snippet if necessary (it is root-only and may contain password hashes).
+
+Proxmox `qm set --cipassword` may transiently expose the password in host process arguments. Restrict access to the node and prefer SSH keys. Full root-password SSH is not enabled by default.

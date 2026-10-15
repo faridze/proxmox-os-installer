@@ -3,13 +3,14 @@
 set -Eeuo pipefail
 umask 077
 
-VERSION="0.2.1"
+VERSION="0.2.2"
 SELF="$(readlink -f -- "${BASH_SOURCE[0]}")"
 ROOT="$(cd -- "$(dirname -- "$SELF")/.." && pwd -P)"
 CATALOG="${ROOT}/catalog/os-images.tsv"
 CHECKER="${ROOT}/lib/image_catalog.py"
 PREFLIGHT="${ROOT}/lib/preflight.py"
 CACHE_OPS="${ROOT}/lib/cache_ops.py"
+SSH_ACCESS="${ROOT}/lib/ssh_access.py"
 CACHE="${PROXMOX_OS_INSTALLER_CACHE:-/var/cache/proxmox-os-installer/images}"
 LIB="${ROOT}/lib"
 
@@ -21,6 +22,7 @@ CREATED=0
 TMP_IMG=""
 TMP_SUM=""
 TMP_SSH=""
+TMP_USER_DUMP=""
 SSH_INLINE_VALIDATED=0
 DRY_RUN=0
 STAGE_NUM=0
@@ -31,6 +33,7 @@ cleanup() {
   [[ -n "$TMP_IMG" ]] && rm -f -- "$TMP_IMG"
   [[ -n "$TMP_SUM" ]] && rm -f -- "$TMP_SUM"
   [[ -n "$TMP_SSH" ]] && rm -f -- "$TMP_SSH"
+  [[ -n "$TMP_USER_DUMP" ]] && rm -f -- "$TMP_USER_DUMP"
   if (( status != 0 && CREATED == 1 )); then
     printf '\nWARNING: VM %s may be partially configured. It was NOT automatically deleted.\n' "$VMID" >&2
     printf 'Inspect with: qm config %s\n' "$VMID" >&2
@@ -153,6 +156,21 @@ if [[ "$DRY_RUN" == 1 ]]; then
 fi
 ask_yes 'Create this VM' n || { printf 'Cancelled.\n'; exit 0; }
 
+# Resolve snippet storage before any VM mutation; create the file only after
+# Proxmox has generated its full per-VM user-data.
+if (( SSH_PASSWORD_LOGIN == 1 )); then
+  SNIPPET_FILE="pveosi-${VMID}-user.yaml"
+  SNIPPET_VOLID="${SNIPPET_STORAGE}:snippets/${SNIPPET_FILE}"
+  SNIPPET_PATH="$(pvesm path "$SNIPPET_VOLID")" || error 'Cannot resolve Proxmox snippets storage path.'
+  if [[ "$SNIPPET_PATH" != /* || "${SNIPPET_PATH##*/}" != "$SNIPPET_FILE" ||
+        "$(basename -- "$(dirname -- "$SNIPPET_PATH")")" != snippets ]]; then
+    error 'Unexpected Proxmox snippet path; refusing to write outside snippets storage.'
+  fi
+  if [[ -e "$SNIPPET_PATH" || -L "$SNIPPET_PATH" ]]; then
+    error 'Existing snippet name for this VM; refusing to overwrite.'
+  fi
+fi
+
 install -d -m 0700 "$CACHE"
 exec {LOCK_FD}>"$CACHE/${OS_ID}.lock"
 flock -x "$LOCK_FD"
@@ -212,6 +230,21 @@ if (( PASSWORD_SET == 1 )); then
   qm_set_cloud_init_password "$VMID"
   unset PASSWORD
 fi
+if (( SSH_PASSWORD_LOGIN == 1 )); then
+  # qm cloudinit dump includes the Proxmox-generated user, keys and password.
+  # Never print its output: it can contain password data.
+  TMP_USER_DUMP="$(mktemp)"
+  if ! qm cloudinit dump "$VMID" user >"$TMP_USER_DUMP" 2>/dev/null; then
+    provisioning_failed 'generate Proxmox user-data for password SSH'
+  fi
+  install -d -m 0755 -- "$(dirname -- "$SNIPPET_PATH")"
+  ACCESS_MODE=user
+  if (( ROOT_PASSWORD_LOGIN == 1 )); then ACCESS_MODE=root; fi
+  python3 "$SSH_ACCESS" create "$TMP_USER_DUMP" "$SNIPPET_PATH" "$ACCESS_MODE" ||
+    provisioning_failed 'prepare first-boot SSH user-data snippet'
+  qm_run "attach password SSH cloud-init snippet for VM ${VMID}" set "$VMID" --cicustom "user=${SNIPPET_VOLID}"
+  printf 'First-boot SSH user-data: %s (keep this file for VM start/migration)\n' "$SNIPPET_VOLID"
+fi
 
 stage 'Final verification'
 python3 "$PREFLIGHT" verify-vm "$VMID" >/dev/null || provisioning_failed "post-create verification"
@@ -227,4 +260,8 @@ else
 fi
 printf 'Inspect: qm config %s\n' "$VMID"
 printf '%s\n' 'Reminder: QEMU Guest Agent must be installed in the guest; enabling the VM option alone does not guarantee it works.'
-printf '%s\n' 'Reminder: cloud images may disable password-based SSH; SSH keys are preferred.'
+if (( SSH_PASSWORD_LOGIN == 1 )); then
+  printf '%s\n' 'Password SSH is configured for first boot; verify inside the guest after cloud-init completes.'
+else
+  printf '%s\n' 'Reminder: cloud images may disable password-based SSH; SSH keys are preferred.'
+fi
