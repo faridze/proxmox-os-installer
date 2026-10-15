@@ -19,9 +19,9 @@ curl --fail --location --silent --show-error --retry 3 --connect-timeout 20 \
   --proto '=https' --proto-redir '=https' --output "$TMP_DIR/source.tar.gz" "$ARCHIVE"
 mkdir -m 0700 "$TMP_DIR/source"
 tar -xzf "$TMP_DIR/source.tar.gz" --strip-components=1 -C "$TMP_DIR/source"
-[[ -f # Execute with Bash even if the Git archive omits +x or /tmp uses noexec.
-bash "$TMP_DIR/source/install.sh" && -f "$TMP_DIR/source/VERSION" ]] || {
+[[ -f "$TMP_DIR/source/install.sh" && -f "$TMP_DIR/source/VERSION" ]] || {
   printf 'ERROR: downloaded archive is incomplete.\n' >&2; exit 1;
 }
-"$TMP_DIR/source/install.sh"
+# Bash execution works even when install.sh lacks executable mode or /tmp is noexec.
+bash "$TMP_DIR/source/install.sh"
 printf '\nNext: proxmox-os-installer\n'
