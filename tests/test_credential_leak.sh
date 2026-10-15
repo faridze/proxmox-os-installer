@@ -69,8 +69,9 @@ EOF
     for _ in {1..5}; do printf '\n'; done
     for _ in {1..4}; do printf '\n'; done
     printf '\n\n'
+    printf 'n\n'
     printf '%s\n%s\n' "$SECRET" "$SECRET"
-    printf 'n\ny\n'
+    printf 'y\n'
   } | "$REPO/bin/proxmox-os-installer" >"$LOG" 2>&1 || true
 
   local leaked=0
