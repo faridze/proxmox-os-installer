@@ -3,24 +3,33 @@
 set -Eeuo pipefail
 umask 077
 
-VERSION="0.1.0"
+VERSION="0.2.0"
 SELF="$(readlink -f -- "${BASH_SOURCE[0]}")"
 ROOT="$(cd -- "$(dirname -- "$SELF")/.." && pwd -P)"
 CATALOG="${ROOT}/catalog/os-images.tsv"
 CHECKER="${ROOT}/lib/image_catalog.py"
-CACHE="/var/cache/proxmox-os-installer/images"
+PREFLIGHT="${ROOT}/lib/preflight.py"
+CACHE_OPS="${ROOT}/lib/cache_ops.py"
+CACHE="${PROXMOX_OS_INSTALLER_CACHE:-/var/cache/proxmox-os-installer/images}"
+LIB="${ROOT}/lib"
+
+# shellcheck source=lib/common.sh
+source "$LIB/common.sh"
+
 VMID=""
 CREATED=0
 TMP_IMG=""
 TMP_SUM=""
+TMP_SSH=""
 DRY_RUN=0
+STAGE_NUM=0
+STAGE_LABEL=""
 
-error() { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
-info() { printf '\n==> %s\n' "$*"; }
 cleanup() {
   local status=$?
-  if [[ -n "$TMP_IMG" ]]; then rm -f -- "$TMP_IMG"; fi
-  if [[ -n "$TMP_SUM" ]]; then rm -f -- "$TMP_SUM"; fi
+  [[ -n "$TMP_IMG" ]] && rm -f -- "$TMP_IMG"
+  [[ -n "$TMP_SUM" ]] && rm -f -- "$TMP_SUM"
+  [[ -n "$TMP_SSH" ]] && rm -f -- "$TMP_SSH"
   if (( status != 0 && CREATED == 1 )); then
     printf '\nWARNING: VM %s may be partially configured. It was NOT automatically deleted.\n' "$VMID" >&2
     printf 'Inspect with: qm config %s\n' "$VMID" >&2
@@ -55,9 +64,20 @@ case "${1:-}" in
     awk -F '|' '!/^#/ && NF == 7 { printf "%-17s %s\n", $1, $2 }' "$CATALOG"
     exit 0 ;;
   --check-catalog) exec python3 "$CHECKER" catalog-check "$CATALOG" ;;
+  --check-upstream) exec python3 "$CHECKER" check-upstream "$CATALOG" ;;
+  --cache-list) exec python3 "$CACHE_OPS" list "$CACHE" "$CATALOG" ;;
+  --cache-prune)
+    if [[ "${2:-}" == "--yes" ]]; then
+      exec python3 "$CACHE_OPS" prune "$CACHE" "$CATALOG" --yes
+    fi
+    python3 "$CACHE_OPS" prune "$CACHE" "$CATALOG"
+    printf '\nDelete the files listed above? (y/n) [n]: '
+    read -r ans || exit 1
+    case "${ans,,}" in y|yes) exec python3 "$CACHE_OPS" prune "$CACHE" "$CATALOG" --yes ;; *) printf 'Cancelled.\n'; exit 0 ;; esac
+    ;;
   --dry-run) DRY_RUN=1 ;;
   '') ;;
-  *) error 'Usage: proxmox-os-installer [--version|--list-os|--check-catalog|--dry-run]' ;;
+  *) error 'Usage: proxmox-os-installer [--version|--list-os|--check-catalog|--check-upstream|--cache-list|--cache-prune|--dry-run]' ;;
 esac
 
 (( EUID == 0 )) || error 'Run as root on a Proxmox VE node.'
@@ -67,21 +87,17 @@ done
 [[ "$(uname -m)" == "x86_64" ]] || error 'This release only supports x86_64 Proxmox nodes.'
 python3 "$CHECKER" catalog-check "$CATALOG" >/dev/null || error 'OS catalog is invalid.'
 
+# shellcheck source=lib/interactive.sh
+source "$LIB/interactive.sh"
+
 printf 'Proxmox OS Installer v%s%s\n\n' "$VERSION" "$([[ "$DRY_RUN" == 1 ]] && printf ' (DRY RUN)' || true)"
-mapfile -t ENTRIES < <(grep -vE '^(#|[[:space:]]*$)' "$CATALOG")
-for i in "${!ENTRIES[@]}"; do
-  IFS='|' read -r osid label user base image sums algo <<< "${ENTRIES[$i]}"
-  printf '%2d) %s\n' "$((i+1))" "$label"
-done
-SELECT="$(ask 'Select OS number' '1')"
-int_range "$SELECT" 'OS selection' 1 "${#ENTRIES[@]}"
-IFS='|' read -r OS_ID OS_LABEL DEFAULT_USER BASE_URL IMAGE_FILE SUMS_FILE ALGO <<< "${ENTRIES[$((10#$SELECT-1))]}"
+select_os_entry
 
 NEXT_ID="$(pvesh get /cluster/nextid --output-format json 2>/dev/null | tr -d '"[:space:]' || true)"
 [[ "$NEXT_ID" =~ ^[0-9]+$ ]] || NEXT_ID=130
 VMID="$(ask 'VM ID' "$NEXT_ID")"
 int_range "$VMID" 'VM ID' 100 999999999
-if qm config "$VMID" >/dev/null 2>&1; then error "VM $VMID already exists; nothing was modified."; fi
+assert_vmid_free
 NAME="$(ask 'VM name' "${OS_ID}-${VMID}")"
 [[ "$NAME" =~ ^[a-zA-Z0-9][a-zA-Z0-9.-]{0,62}$ ]] || error 'Invalid VM name.'
 CORES="$(ask 'CPU cores' 8)"
@@ -91,14 +107,11 @@ int_range "$CORES" 'CPU cores' 1 256
 int_range "$RAM_GIB" 'RAM' 1 1024
 int_range "$DISK_GIB" 'Disk' 10 16384
 RAM_MIB="$((10#$RAM_GIB*1024))"
-printf '\nAvailable storages:\n'
-pvesm status || error 'Cannot retrieve storage information.'
-STORAGE="$(ask 'Target storage (images + cloudinit)' 'local-lvm')"
-[[ "$STORAGE" =~ ^[a-zA-Z][a-zA-Z0-9_.-]*$ ]] || error 'Invalid storage ID.'
-pvesm status --content images | awk -v s="$STORAGE" 'NR > 1 && $1 == s && $3 == "active" {found=1} END {exit !found}' || error "Storage $STORAGE is not active or does not support VM disk images."
-BRIDGE="$(ask 'Network bridge' 'vmbr0')"
-[[ "$BRIDGE" =~ ^[a-zA-Z0-9_.:-]+$ ]] || error 'Invalid network bridge.'
-ip link show dev "$BRIDGE" >/dev/null 2>&1 || error "Bridge $BRIDGE not found."
+
+stage 'Preflight validation'
+assert_vmid_free
+pick_storage
+pick_bridge
 VLAN="$(ask 'VLAN tag (blank = untagged)' '')"
 NIC="virtio,bridge=$BRIDGE"
 if [[ -n "$VLAN" ]]; then
@@ -127,97 +140,88 @@ PY
     ;;
   *) error 'Network mode must be dhcp or static.' ;;
 esac
-USERNAME="$(ask 'Cloud-init username' "$DEFAULT_USER")"
-[[ "$USERNAME" =~ ^[a-z_][a-z0-9_-]{0,30}$ ]] || error 'Invalid username.'
-SSH_PUBKEY="$(ask 'Public SSH key file (blank = no key)' '')"
-if [[ -n "$SSH_PUBKEY" ]]; then
-  [[ -r "$SSH_PUBKEY" && -f "$SSH_PUBKEY" ]] || error 'Cannot read SSH public key.'
-  grep -Eq '^(ssh-(ed25519|rsa)|ecdsa-sha2-|sk-ssh-|sk-ecdsa-)' "$SSH_PUBKEY" || error 'Invalid SSH public key format.'
-fi
-PASSWORD_SET=0
-if [[ -z "$SSH_PUBKEY" ]] || ask_yes 'Also set console login password' n; then
-  PASSWORD_SET=1
-  read -rsp 'Login password: ' PASSWORD || error 'Input cancelled.'
-  printf '\n'
-  [[ -n "$PASSWORD" ]] || error 'Password cannot be empty.'
-  read -rsp 'Confirm password: ' PASSWORD_CONFIRM || error 'Input cancelled.'
-  printf '\n'
-  [[ "$PASSWORD" == "$PASSWORD_CONFIRM" ]] || error 'Passwords do not match.'
-  unset PASSWORD_CONFIRM
-fi
 
-printf '\n--------- VM SUMMARY ---------\n'
-printf 'OS: %s\nVM: %s (%s)\nCPU: %s\nRAM: %s GiB\nDisk: %s GiB @ %s\nNIC: %s\nIP: %s\nUser: %s\nSSH key: %s\nPassword set: %s\n' \
-  "$OS_LABEL" "$VMID" "$NAME" "$CORES" "$RAM_GIB" "$DISK_GIB" "$STORAGE" "$NIC" "$IP_CONFIG" "$USERNAME" \
-  "${SSH_PUBKEY:-none}" "$PASSWORD_SET"
-printf '%s\n' '------------------------------'
+TMP_SSH="$(mktemp)"
+collect_auth
+print_summary
+
 if [[ "$DRY_RUN" == 1 ]]; then
   printf 'DRY RUN: no downloads, file writes, or VM changes performed.\n'
   exit 0
 fi
 ask_yes 'Create this VM' n || { printf 'Cancelled.\n'; exit 0; }
 
-# Lock the cached image across parallel runs. Root-only cache directory.
 install -d -m 0700 "$CACHE"
 exec {LOCK_FD}>"$CACHE/${OS_ID}.lock"
 flock -x "$LOCK_FD"
+
+stage 'Upstream metadata and checksum verification'
 TMP_SUM="$(mktemp "$CACHE/.checksums.XXXXXXXX")"
 SUMS_URL="${BASE_URL}/${SUMS_FILE}"
 IMAGE_URL="${BASE_URL}/${IMAGE_FILE}"
-info 'Fetching official checksum manifest (HTTPS required)'
-curl --fail --location --silent --show-error --retry 3 --connect-timeout 20 \
-  --proto '=https' --proto-redir '=https' -o "$TMP_SUM" "$SUMS_URL" || error "Unable to fetch $SUMS_URL"
-EXPECTED="$(python3 "$CHECKER" digest "$TMP_SUM" "$IMAGE_FILE" "$ALGO")" || error 'Cannot verify the image using the official checksum list.'
+if ! curl --fail --location --silent --show-error --retry 3 --connect-timeout 20 \
+  --proto '=https' --proto-redir '=https' -o "$TMP_SUM" "$SUMS_URL"; then
+  provisioning_failed "fetch checksum manifest" "Unable to fetch $SUMS_URL"
+fi
+EXPECTED="$(python3 "$CHECKER" digest "$TMP_SUM" "$IMAGE_FILE" "$ALGO")" || provisioning_failed "parse checksum manifest"
 CACHED_IMAGE="${CACHE}/${OS_ID}-${IMAGE_FILE}"
 verify() { printf '%s  %s\n' "$EXPECTED" "$1" | "${ALGO}sum" -c --status -; }
+
+stage 'Image download or cache reuse'
 if [[ -s "$CACHED_IMAGE" ]] && verify "$CACHED_IMAGE"; then
   info 'Using checksum-verified image from local cache'
 else
   TMP_IMG="$(mktemp "$CACHE/.image.XXXXXXXX")"
   info "Downloading official ${OS_LABEL} image"
-  curl --fail --location --show-error --retry 3 --connect-timeout 20 \
-    --proto '=https' --proto-redir '=https' -o "$TMP_IMG" "$IMAGE_URL" || error "Failed to download $IMAGE_URL"
-  verify "$TMP_IMG" || error 'SHA checksum mismatch. No VM created.'
+  if ! curl --fail --location --show-error --retry 3 --connect-timeout 20 \
+    --proto '=https' --proto-redir '=https' -o "$TMP_IMG" "$IMAGE_URL"; then
+    provisioning_failed "download cloud image" "Failed to download $IMAGE_URL"
+  fi
+  verify "$TMP_IMG" || provisioning_failed "verify downloaded image checksum" "SHA mismatch; no VM created."
   chmod 0600 "$TMP_IMG"
   mv -f -- "$TMP_IMG" "$CACHED_IMAGE"
   TMP_IMG=""
 fi
 
-# Reject unexpected formats and backing-file qcow2 to avoid unsafe dependencies.
-python3 - "$CACHED_IMAGE" "$DISK_GIB" <<'PY' || error 'Invalid image format/backing file, or insufficient target disk size.'
-import json,subprocess,sys
-r=subprocess.run(['qemu-img','info','--output=json',sys.argv[1]],check=True,capture_output=True,text=True)
-d=json.loads(r.stdout)
-assert d['format'] in ('qcow2','raw') and not d.get('backing-filename')
-assert d['virtual-size'] <= int(sys.argv[2])*1024**3
-PY
-# Pre-create collision check. qm itself refuses existing IDs.
-qm config "$VMID" >/dev/null 2>&1 && error 'VM ID was claimed concurrently.'
-info 'Creating Proxmox VM'
-qm create "$VMID" --name "$NAME" --cores "$CORES" --cpu host \
+python3 "$PREFLIGHT" image-validate "$CACHED_IMAGE" "$DISK_GIB" >/dev/null || \
+  provisioning_failed "image size/format validation"
+
+assert_vmid_free
+
+stage 'VM creation'
+run_qm create "$VMID" --name "$NAME" --cores "$CORES" --cpu host \
   --memory "$RAM_MIB" --net0 "$NIC" --scsihw virtio-scsi-single \
   --serial0 socket --vga serial0 --agent enabled=1 --ostype l26
 CREATED=1
-info "Importing disk onto $STORAGE"
-qm set "$VMID" --scsi0 "${STORAGE}:0,import-from=${CACHED_IMAGE},discard=on,iothread=1,ssd=1"
-qm resize "$VMID" scsi0 "${DISK_GIB}G"
-qm set "$VMID" --ide2 "${STORAGE}:cloudinit"
-qm set "$VMID" --boot 'order=scsi0'
-qm set "$VMID" --ciuser "$USERNAME"
-qm set "$VMID" --ipconfig0 "$IP_CONFIG"
-if [[ -n "$DNS" ]]; then qm set "$VMID" --nameserver "$DNS"; fi
-if [[ -n "$SSH_PUBKEY" ]]; then qm set "$VMID" --sshkeys "$SSH_PUBKEY"; fi
+
+stage 'Disk import and resize'
+run_qm set "$VMID" --scsi0 "${STORAGE}:0,import-from=${CACHED_IMAGE},discard=on,iothread=1,ssd=1"
+run_qm resize "$VMID" scsi0 "${DISK_GIB}G"
+
+stage 'Cloud-Init configuration'
+run_qm set "$VMID" --ide2 "${STORAGE}:cloudinit"
+run_qm set "$VMID" --boot 'order=scsi0'
+run_qm set "$VMID" --ciuser "$USERNAME"
+run_qm set "$VMID" --ipconfig0 "$IP_CONFIG"
+[[ -n "$DNS" ]] && run_qm set "$VMID" --nameserver "$DNS"
+[[ -n "$SSH_PUBKEY" ]] && run_qm set "$VMID" --sshkeys "$SSH_PUBKEY"
 if (( PASSWORD_SET == 1 )); then
-  qm set "$VMID" --cipassword "$PASSWORD"
+  run_qm set "$VMID" --cipassword "$PASSWORD"
   unset PASSWORD
 fi
+
+stage 'Final verification'
+python3 "$PREFLIGHT" verify-vm "$VMID" >/dev/null || provisioning_failed "post-create verification"
+
+stage 'Optional VM startup'
 printf '\nSUCCESS: VM %s (%s) created.\n' "$VMID" "$OS_LABEL"
+printf 'Resources: %s vCPU, %s GiB RAM, %s GiB disk on %s\n' "$CORES" "$RAM_GIB" "$DISK_GIB" "$STORAGE"
 if ask_yes 'Start VM now' y; then
-  qm start "$VMID"
+  run_qm start "$VMID" || provisioning_failed "qm start"
   printf 'VM started. Serial console: qm terminal %s\n' "$VMID"
 else
   printf 'VM left stopped. Start: qm start %s\n' "$VMID"
 fi
 printf 'Inspect: qm config %s\n' "$VMID"
-printf '%s\n' 'Reminder: enable qemu-guest-agent inside the guest when necessary.'
+printf '%s\n' 'Reminder: QEMU Guest Agent must be installed in the guest; enabling the VM option alone does not guarantee it works.'
 printf '%s\n' 'Reminder: cloud images may disable password-based SSH; SSH keys are preferred.'

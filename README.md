@@ -1,27 +1,59 @@
 # Proxmox OS Installer
 
-Fast interactive cloud-image VM provisioning for **Proxmox VE 8+ (x86_64)**. Build Debian, Ubuntu, AlmaLinux or Rocky Linux VMs without running the ISO installer. Uses official upstream images, cloud-init, and Proxmox `qm` with any active image-capable storage (including `local-lvm`).
+Fast interactive cloud-image VM provisioning for **Proxmox VE 8+ (x86_64)**. Build Debian, Ubuntu, AlmaLinux, or Rocky Linux VMs without running the ISO installer. Uses official upstream images, cloud-init, and Proxmox `qm` with any active image-capable storage (including `local-lvm`).
 
-> **Status: v0.1.0 / initial release.** Offline tests pass; real VM deployment and all eight upstream downloads have not yet been end-to-end verified. First use should be on a test VM.
+> **Status: v0.2.0.** Offline mocked tests cover provisioning safety paths; **no supported OS has been fully boot-tested in CI** (CI never creates a real VM). Validate on a lab node using [docs/MANUAL_VALIDATION.md](docs/MANUAL_VALIDATION.md) before production use.
 
-## Install in two commands (on a Proxmox node, as root)
+## Quick install from GitHub (on a Proxmox node, as root)
 
 ```bash
-curl -fsSLo /root/proxmox-os-installer-bootstrap.sh https://raw.githubusercontent.com/faridze/proxmox-os-installer/main/bootstrap.sh
+curl -fsSLo /root/proxmox-os-installer-bootstrap.sh \
+  https://raw.githubusercontent.com/faridze/proxmox-os-installer/main/bootstrap.sh
 bash /root/proxmox-os-installer-bootstrap.sh
 ```
 
-Review the downloaded script before running it as root. The bootstrap downloads the GitHub repository archive over HTTPS and installs only the local CLI files; no packages/services are modified. To update in the future, run the same two commands again after reviewing upstream changes.
+Review the bootstrap script before running it as root. It downloads the repository archive over HTTPS and installs local CLI files only; it does not install host packages or change cluster networking.
 
-To launch the wizard:
+**Pinned / production installs:** set `PROXMOX_OS_INSTALLER_REF` to a reviewed tag or commit:
+
+```bash
+PROXMOX_OS_INSTALLER_REF=<tag-or-commit> bash /root/proxmox-os-installer-bootstrap.sh
+```
+
+For a fully pinned rollout, fetch the bootstrap script from the same ref (not only `main`).
+
+## Update the installed tool
+
+Re-run the bootstrap (after reviewing upstream changes), or from a git checkout:
+
+```bash
+cd proxmox-os-installer && sudo ./install.sh
+```
+
+## Create a VM
 
 ```bash
 proxmox-os-installer
 ```
 
-A pinned reviewed Git tag or commit can be used to avoid floating `main` for installs: `PROXMOX_OS_INSTALLER_REF=v0.1.0 bash /root/proxmox-os-installer-bootstrap.sh` (only after that tag has actually been published). The bootstrap itself is retrieved from `main`, so for a fully pinned deployment also fetch the bootstrap from the pinned ref.
+The wizard uses a **two-level OS menu** (distribution, then version), then prompts for VM ID/name, CPU, memory, disk, storage, bridge, optional VLAN, DHCP or static IPv4, DNS, cloud-init user, and SSH public key (preferred) or optional login password. Defaults: **8 vCPU, 24 GiB RAM, 150 GiB disk**, **`local-lvm`** when available, **`vmbr0`** when present. Active storages and bridges are discovered from the node where possible.
 
-## Supported systems
+An explicit confirmation is required before any download or VM creation.
+
+### Commands
+
+```bash
+proxmox-os-installer                 # interactive provisioning
+proxmox-os-installer --dry-run       # validate inputs; no download/VM changes
+proxmox-os-installer --list-os       # flat OS list
+proxmox-os-installer --check-catalog # validate local catalog file
+proxmox-os-installer --check-upstream # probe official manifest/image URLs (no full image download)
+proxmox-os-installer --cache-list    # list checksum-verified cache files and usage
+proxmox-os-installer --cache-prune     # preview obsolete cache entries; confirm before delete
+proxmox-os-installer --version
+```
+
+## Supported OS versions
 
 | OS | Versions | Default user |
 |---|---|---|
@@ -30,48 +62,65 @@ A pinned reviewed Git tag or commit can be used to avoid floating `main` for ins
 | AlmaLinux | 9, 10 | `almalinux` |
 | Rocky Linux | 9, 10 | `rocky` |
 
-The OS choices live in `catalog/os-images.tsv`. Add new official cloud images + their checksum manifest there; the main VM workflow does not require edits for common `qcow2`/`raw` cloud images.
+Catalog: `catalog/os-images.tsv`. Run `proxmox-os-installer --check-upstream` to verify mirrors; `NETWORK` lines indicate connectivity problems, `FAIL` indicates missing or unsupported upstream paths.
 
-## Wizard
+## Image cache management
 
-The wizard asks for the OS release, VM ID/name, vCPU count, memory, disk size, storage, bridge, optional VLAN, IPv4 DHCP or static IP/gateway/DNS, cloud-init username, and an SSH public key or password. Defaults are **8 vCPU, 24 GiB RAM, 150 GiB disk, `local-lvm`, `vmbr0`, DHCP**; everything is adjustable. An explicit confirmation is required before download and VM creation.
+Cache directory (default): `/var/cache/proxmox-os-installer/images`
 
-```bash
-proxmox-os-installer              # interactive provisioning
-proxmox-os-installer --dry-run    # validate inputs; do not download/create a VM
-proxmox-os-installer --list-os    # list available distributions
-proxmox-os-installer --check-catalog
-proxmox-os-installer --version
-```
+- Images are reused only after verification against the **current** upstream checksum manifest.
+- Downloads use file locks (`$OS_ID.lock`) to avoid concurrent corruption.
+- `--cache-prune` never deletes files covered by an active lock or in-progress temp names (`.image.*`, `.checksums.*`).
 
-The installer does not overwrite existing VM IDs, auto-delete incomplete VMs, change host networking, modify firewall rules or install host packages. Cache path: `/var/cache/proxmox-os-installer/images`. It reuses images only after validating them against the current upstream checksum manifest. Partially configured new VMs are left in place for inspection if a command fails.
+## Provisioning safety (v0.2.0)
 
-**Console/login:** Cloud images may disable password-based SSH even when a console login password is configured; use SSH public keys for remote access. QEMU Guest Agent is enabled in the VM config but may need to be installed in the guest. Confirm guest partition growth with `lsblk`/`df -h` after boot.
+- VM ID checked before prompts and again immediately before `qm create`.
+- Proxmox command failures abort with the failed operation, VM ID, and **manual** recovery hints (`qm config`, optional `qm destroy --purge` only if you explicitly intend to).
+- Storage must be **active** and support VM **images** (including cloud-init drives).
+- Non-thin storage: errors when reported free space is below requested disk size.
+- Thin / shared pools: **warnings** that reported free space is not a capacity guarantee.
+- Image virtual size must not exceed requested disk size; checksum and format validated before import.
+- Post-create verification ensures `scsi0` and cloud-init `ide2` appear in `qm config`.
+- **Never** overwrites an existing VM ID; **never** auto-deletes a partial VM.
 
-## Manual install / development
+## Troubleshooting
+
+| Symptom | What to check |
+|---|---|
+| `VM ID already in use` | `qm list` / `qm config <id>`; pick another ID |
+| Storage preflight failed | `pvesm status`, ensure `images` content is active |
+| Thin pool warning | Ensure sufficient real capacity; thin oversubscription can still fail at runtime |
+| Checksum mismatch | Re-run; delete bad cache file only via `--cache-prune` after review |
+| Partial VM after error | `qm config <id>`; destroy manually only if intended |
+| `--check-upstream` NETWORK | DNS/firewall; distinguish from unsupported catalog URLs |
+| SSH login fails | Use SSH keys; many images disable password SSH |
+| Guest IP missing | Cloud-init network, bridge/VLAN, DHCP server |
+
+## Security limitations
+
+- HTTPS + manifest checksums; **no detached GPG manifest verification** yet.
+- Bootstrap trusts GitHub TLS; pin refs for controlled rollouts.
+- `qm set --cipassword` may expose passwords briefly in process listings; **SSH keys are strongly preferred**.
+- QEMU Guest Agent is enabled in VM config only; install/start the agent in the guest separately.
+- Password-based SSH may be disabled in upstream cloud images even when a password is set.
+
+## Development / CI
 
 ```bash
 git clone https://github.com/faridze/proxmox-os-installer.git
 cd proxmox-os-installer
-python3 -m unittest discover -s tests -v
+python3 -m unittest discover -s tests -p 'test_*.py' -v
 bash -n bootstrap.sh install.sh bin/proxmox-os-installer
-sudo ./install.sh
+sudo bash tests/test_dry_run.sh
+sudo bash tests/test_provision.sh
+sudo bash tests/test_provision_flow.sh
+sudo bash tests/test_provision_failures.sh
 ```
 
-To make a new OS version available, edit `catalog/os-images.tsv` and run the tests. Catalog entry format:
+CI uses mocked `qm`/`pvesm` and **does not create real VMs**.
 
-```text
-id|name|cloud_username|https_base_url|image_filename|checksum_manifest_filename|sha256_or_sha512
-```
+## Manual Proxmox validation
 
-Check the filename and upstream checksum format before releasing a new entry. Entries with ISO-only installers are **not** supported by the generic cloud-image workflow.
-
-## Security / current limitations
-
-- Image fetches require HTTPS, follow HTTPS-only redirects, validate SHA256/SHA512 digests from the vendor manifest and recheck cached downloads. **Detached GPG verification of the vendor manifest is not yet implemented**; HTTPS + checksums alone is weaker than verifying an independently trusted signature.
-- The bootstrap downloads GitHub source over HTTPS, but does not verify a project release signature. For controlled production rollouts, review and pin a commit or signed release first.
-- Console passwords are passed to `qm set --cipassword` as supported by Proxmox; this can expose a password transiently in process arguments. Prefer an SSH key and skip the password where practical.
-- Default CPU mode is `host` (best performance on a single node; consider migration compatibility on mixed-CPU clusters).
-- No auto-template, unattended batch creation, or unattended updates yet.
+See [docs/MANUAL_VALIDATION.md](docs/MANUAL_VALIDATION.md) for the per-OS matrix and checklist.
 
 License: MIT.

@@ -21,6 +21,15 @@ class CatalogTests(unittest.TestCase):
             f.write_text('f'*64 + ' *rocky.qcow2\n')
             self.assertEqual(catalog.find_digest(f, 'rocky.qcow2', 'sha256'), 'f'*64)
 
+    def test_almalinux_single_space_manifest(self):
+        with tempfile.TemporaryDirectory() as d:
+            f = Path(d) / 'sums'
+            f.write_text('a'*64 + '  AlmaLinux-9-GenericCloud-latest.x86_64.qcow2\n')
+            self.assertEqual(
+                catalog.find_digest(f, 'AlmaLinux-9-GenericCloud-latest.x86_64.qcow2', 'sha256'),
+                'a'*64,
+            )
+
     def test_bsd_manifest(self):
         with tempfile.TemporaryDirectory() as d:
             f = Path(d) / 'sums'

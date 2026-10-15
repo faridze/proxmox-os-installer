@@ -6,6 +6,8 @@ as fixed argument-vector elements (never shell-evaluated).
 """
 import re
 import sys
+import urllib.error
+import urllib.request
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -79,14 +81,92 @@ def find_digest(manifest_file, image_name, algo):
     return matches.pop()
 
 
+class UpstreamNetworkError(RuntimeError):
+    """Transport failure reaching upstream (not an unsupported image)."""
+
+
+def _probe_url(url, timeout=20):
+    headers = {"User-Agent": "proxmox-os-installer/0.2.0"}
+    for method in ("HEAD", "GET"):
+        req = urllib.request.Request(url, method=method, headers=headers)
+        if method == "GET":
+            req.add_header("Range", "bytes=0-0")
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                return resp.status if method == "HEAD" else resp.status
+        except urllib.error.HTTPError as exc:
+            if exc.code in (405, 501) and method == "HEAD":
+                continue
+            return exc.code
+        except urllib.error.URLError as exc:
+            raise UpstreamNetworkError(str(exc.reason)) from exc
+    raise UpstreamNetworkError(f"cannot probe {url}")
+
+
+def check_upstream(catalog_path):
+    entries = load_catalog(catalog_path)
+    failures = 0
+    for os_id, label, _user, base, image, manifest, algo in entries:
+        manifest_url = f"{base}/{manifest}"
+        image_url = f"{base}/{image}"
+        try:
+            m_status = _probe_url(manifest_url)
+            i_status = _probe_url(image_url)
+        except UpstreamNetworkError as exc:
+            print(f"NETWORK {os_id}: {exc}")
+            failures += 1
+            continue
+        if m_status >= 400:
+            print(f"FAIL {os_id}: checksum manifest unavailable ({manifest_url}) HTTP {m_status}")
+            failures += 1
+            continue
+        if i_status >= 400:
+            print(f"FAIL {os_id}: image unavailable ({image_url}) HTTP {i_status}")
+            failures += 1
+            continue
+        print(f"OK   {os_id}: manifest and image reachable ({algo})")
+    if failures:
+        raise ValueError(f"{failures} upstream check(s) failed")
+    return len(entries)
+
+
+def distro_groups(catalog_path):
+    order = ("debian", "ubuntu", "almalinux", "rocky")
+    labels = {
+        "debian": "Debian",
+        "ubuntu": "Ubuntu",
+        "almalinux": "AlmaLinux",
+        "rocky": "Rocky Linux",
+    }
+    entries = load_catalog(catalog_path)
+    groups = {k: [] for k in order}
+    for row in entries:
+        os_id = row[0]
+        family = os_id.split("-", 1)[0]
+        if family in groups:
+            groups[family].append(row)
+    for family in order:
+        if groups[family]:
+            print(f"{family}|{labels[family]}|{len(groups[family])}")
+
+
 def main():
     try:
         if len(sys.argv) == 3 and sys.argv[1] == "catalog-check":
             print(f"OK: {len(load_catalog(sys.argv[2]))} supported OS versions")
+        elif len(sys.argv) == 3 and sys.argv[1] == "check-upstream":
+            count = check_upstream(sys.argv[2])
+            print(f"OK: {count} OS entries reachable")
+        elif len(sys.argv) == 3 and sys.argv[1] == "distro-groups":
+            distro_groups(sys.argv[2])
         elif len(sys.argv) == 5 and sys.argv[1] == "digest":
             print(find_digest(sys.argv[2], sys.argv[3], sys.argv[4]))
         else:
-            print("Usage: image_catalog.py catalog-check CATALOG | digest MANIFEST IMAGE ALGO", file=sys.stderr)
+            print(
+                "Usage: image_catalog.py catalog-check CATALOG | check-upstream CATALOG | "
+                "distro-groups CATALOG | digest MANIFEST IMAGE ALGO",
+                file=sys.stderr,
+            )
             return 2
     except (ValueError, OSError, UnicodeError) as exc:
         print(f"ERROR: {exc}", file=sys.stderr)

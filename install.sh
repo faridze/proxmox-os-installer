@@ -9,7 +9,12 @@ python3 "$REPO/lib/image_catalog.py" catalog-check "$REPO/catalog/os-images.tsv"
 install -d -m 0755 "$TARGET"/{bin,catalog,lib} /usr/local/sbin
 install -m 0755 "$REPO/bin/proxmox-os-installer" "$TARGET/bin/proxmox-os-installer"
 install -m 0644 "$REPO/catalog/os-images.tsv" "$TARGET/catalog/os-images.tsv"
-install -m 0644 "$REPO/lib/image_catalog.py" "$TARGET/lib/image_catalog.py"
+for py in image_catalog.py preflight.py cache_ops.py; do
+  install -m 0644 "$REPO/lib/$py" "$TARGET/lib/$py"
+done
+for sh in common.sh interactive.sh; do
+  install -m 0644 "$REPO/lib/$sh" "$TARGET/lib/$sh"
+done
 install -m 0644 "$REPO/VERSION" "$TARGET/VERSION"
 ln -sfn "$TARGET/bin/proxmox-os-installer" "$ENTRY"
 "$ENTRY" --check-catalog

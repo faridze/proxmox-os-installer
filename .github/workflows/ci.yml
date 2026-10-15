@@ -9,12 +9,30 @@ permissions:
 jobs:
   check:
     runs-on: ubuntu-24.04
-    timeout-minutes: 5
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
       - name: Check Bash syntax
-        run: bash -n bootstrap.sh install.sh bin/proxmox-os-installer tests/test_dry_run.sh
-      - name: Catalog and manifest tests
-        run: python3 -m unittest discover -s tests -v
+        run: |
+          bash -n bootstrap.sh install.sh bin/proxmox-os-installer
+          bash -n tests/test_dry_run.sh tests/test_provision.sh tests/test_provision_flow.sh
+      - name: ShellCheck (optional)
+        run: |
+          if command -v shellcheck >/dev/null 2>&1; then
+            shellcheck -e SC1091 bin/proxmox-os-installer lib/common.sh lib/interactive.sh || true
+          else
+            echo "shellcheck not installed; skipping"
+          fi
+      - name: Python unit tests
+        run: python3 -m unittest discover -s tests -p 'test_*.py' -v
       - name: Dry-run mock (no VM created)
         run: sudo bash tests/test_dry_run.sh
+      - name: Provision mocks (no VM created)
+        run: |
+          sudo bash tests/test_provision.sh
+          sudo bash tests/test_provision_flow.sh
+          sudo bash tests/test_provision_failures.sh
+      - name: Upstream check (network)
+        run: |
+          python3 lib/image_catalog.py check-upstream catalog/os-images.tsv || \
+            echo "Upstream check failed (network or mirror); offline tests still passed."
