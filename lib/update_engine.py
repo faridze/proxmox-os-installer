@@ -258,13 +258,22 @@ def run_validation(tree: Path, *, installed: bool = False) -> None:
         )
 
 
-def stage_install(tree: Path, stage_root: Path, meta: dict[str, Any]) -> None:
+def stage_install(
+    tree: Path,
+    stage_root: Path,
+    meta: dict[str, Any],
+    paths: Optional[InstallPaths] = None,
+) -> None:
     if stage_root.exists():
         shutil.rmtree(stage_root)
     env = os.environ.copy()
     env["PVEOSI_INSTALL_ROOT"] = str(stage_root)
+    if paths is not None:
+        env["PVEOSI_INSTALL_ENTRY"] = str(paths.entry_link)
+        env["PVEOSI_ALIAS_BINDIR"] = str(paths.alias_bindir)
     env["PVEOSI_SKIP_ALIASES"] = "1"
     env["PVEOSI_SKIP_MAIN_ENTRY"] = "1"
+    env["PVEOSI_QUIET_INSTALL"] = "1"
     env["PVEOSI_INSTALL_REF"] = str(meta.get("install_ref", ""))
     env["PVEOSI_INSTALL_COMMIT"] = str(meta.get("commit_sha", ""))
     env["PVEOSI_INSTALL_REPO"] = str(meta.get("repository", DEFAULT_REPO_HTTPS))
@@ -275,8 +284,11 @@ def stage_install(tree: Path, stage_root: Path, meta: dict[str, Any]) -> None:
 def refresh_aliases(install_root: Path, paths: InstallPaths) -> None:
     env = os.environ.copy()
     env["PVEOSI_INSTALL_ROOT"] = str(install_root)
+    env["PVEOSI_INSTALL_ENTRY"] = str(paths.entry_link)
+    env["PVEOSI_ALIAS_BINDIR"] = str(paths.alias_bindir)
     env["PVEOSI_SKIP_FILE_COPY"] = "1"
     env["PVEOSI_WRITE_METADATA"] = "0"
+    env["PVEOSI_QUIET_INSTALL"] = "1"
     subprocess.run(["bash", str(install_root / "install.sh")], check=True, env=env, cwd=str(install_root))
 
 
@@ -420,7 +432,9 @@ def perform_update(
     installed_ver = read_version(paths.install_root) if paths.install_root.is_dir() else meta.get("version", "unknown")
     cur_commit = installed_commit(paths, meta) or "(unknown)"
 
-    with tempfile.TemporaryDirectory(prefix="pveosi-update.", dir="/var/tmp") as tmp:
+    work_parent = paths.install_root.parent
+    work_parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix="pveosi-update.", dir=str(work_parent)) as tmp:
         tmp_path = Path(tmp)
         archive = tmp_path / "source.tar.gz"
         download_tarball(target.commit, archive, target.source)
@@ -444,7 +458,7 @@ def perform_update(
             "channel": target.ref,
             "installed_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         }
-        stage_install(tree, stage_root, new_meta)
+        stage_install(tree, stage_root, new_meta, paths)
         run_validation(stage_root, installed=True)
 
         lock_path = Path(os.environ.get("PVEOSI_UPDATE_LOCK", LOCK_PATH))
@@ -523,7 +537,9 @@ def cmd_update(argv: list[str]) -> int:
     cur_commit = installed_commit(paths, meta)
     # Version comparison alone is insufficient; compare commits when known.
     try:
-        with tempfile.TemporaryDirectory(prefix="pveosi-check.", dir="/var/tmp") as tmp:
+        work_parent = paths.install_root.parent
+        work_parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(prefix="pveosi-check.", dir=str(work_parent)) as tmp:
             archive = Path(tmp) / "source.tar.gz"
             download_tarball(target.commit, archive, target.source)
             tree = safe_extract_tar(archive, Path(tmp) / "extract")

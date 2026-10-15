@@ -27,6 +27,7 @@ if [[ "${PVEOSI_SKIP_FILE_COPY:-0}" != 1 ]]; then
     install -m 0644 "$REPO/lib/$sh" "$TARGET/lib/$sh"
   done
   install -m 0644 "$REPO/VERSION" "$TARGET/VERSION"
+  install -m 0755 "$REPO/install.sh" "$TARGET/install.sh"
 fi
 
 if [[ "${PVEOSI_SKIP_MAIN_ENTRY:-0}" != 1 ]]; then
