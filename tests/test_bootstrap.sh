@@ -22,17 +22,24 @@ cat > "$TMP/bin/curl" <<'MOCK_CURL'
 #!/usr/bin/env bash
 set -Eeuo pipefail
 out=''
+url=''
 while (( $# )); do
   case "$1" in
     --output|-o) out="$2"; shift 2 ;;
+    http*) url="$1"; shift ;;
     *) shift ;;
   esac
 done
 [[ -n "$out" ]] || exit 41
-cp -- "$TEST_ARCHIVE" "$out"
+if [[ "$url" == *'/commits/'* ]]; then
+  printf '{"sha":"%s"}\n' '0000000000000000000000000000000000000001' >"$out"
+else
+  cp -- "$TEST_ARCHIVE" "$out"
+fi
 MOCK_CURL
 chmod +x "$TMP/bin/qm" "$TMP/bin/curl"
+FAKE_SHA='0000000000000000000000000000000000000001'
 export TEST_ARCHIVE="$TMP/fixture.tar.gz" TEST_MARKER="$TMP/marker" PATH="$TMP/bin:$PATH"
-PROXMOX_OS_INSTALLER_REF=bootstrap-nonexec-test bash "$ROOT/bootstrap.sh" > "$TMP/output" 2>&1
+PROXMOX_OS_INSTALLER_REF="$FAKE_SHA" bash "$ROOT/bootstrap.sh" > "$TMP/output" 2>&1
 grep -qx INSTALLED "$TEST_MARKER"
 echo 'OK: bootstrap runs non-executable archive install.sh via Bash'

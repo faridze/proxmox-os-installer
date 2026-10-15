@@ -2,7 +2,7 @@
 
 Fast interactive cloud-image VM provisioning for **Proxmox VE 8+ (x86_64)**. Build Debian, Ubuntu, AlmaLinux, or Rocky Linux VMs without running the ISO installer. Uses official upstream images, cloud-init, and Proxmox `qm` with any active image-capable storage (including `local-lvm`).
 
-> **Status: v0.2.2 (experimental first-boot SSH password support).** Offline mocked tests cover provisioning safety paths; **no supported OS has been fully boot-tested in CI** (CI never creates a real VM). Validate on a lab node using [docs/MANUAL_VALIDATION.md](docs/MANUAL_VALIDATION.md) before production use.
+> **Status: v0.2.3 (self-update + experimental first-boot SSH password support).** Offline mocked tests cover provisioning safety paths; **no supported OS has been fully boot-tested in CI** (CI never creates a real VM). Validate on a lab node using [docs/MANUAL_VALIDATION.md](docs/MANUAL_VALIDATION.md) before production use.
 
 ## Quick install from GitHub (on a Proxmox node, as root)
 
@@ -22,13 +22,35 @@ PROXMOX_OS_INSTALLER_REF=<tag-or-commit> bash /root/proxmox-os-installer-bootstr
 
 For a fully pinned rollout, fetch the bootstrap script from the same ref (not only `main`).
 
+Bootstrap and install record provenance in `install-metadata.json` under the install root (version, commit SHA when known, repository, install ref/channel, timestamp). This metadata drives safe update checks.
+
+**Existing v0.2.2 (or older) installs** without metadata must run bootstrap or `install.sh` from a reviewed tree **once** before `pveosi update` is available.
+
 ## Update the installed tool
 
-Re-run the bootstrap (after reviewing upstream changes), or from a git checkout:
+From **v0.2.3+**, use the built-in updater (HTTPS download from the official GitHub repository only; no `curl | bash` during update):
+
+```bash
+pveosi update --check          # read-only: show installed vs available target
+pveosi update                  # interactive confirmation before install
+pveosi update --yes            # skip confirmation only
+pveosi update --ref <tag-or-commit>   # install a specific reviewed ref
+```
+
+**Update channels**
+
+- Installs that track `main` check `main` for updates.
+- Installs pinned to a **commit** or **non-main branch** stay on that channel; they are **not** silently switched to `main`. Use `--ref` to move to another ref (including `main`) explicitly.
+- If provenance is unknown (no metadata), specify `--ref` instead of guessing.
+
+**Rollback:** each update stages a full tree, validates it, then swaps the install directory. The previous install is kept as `proxmox-os-installer.previous` until the next successful update; if activation fails, the prior tree is restored automatically.
+
+**Security:** updates trust GitHub over TLS; there are no detached signatures yet. Pin refs for production. Updates touch only this application's files under `/usr/local` and metadata; they do **not** modify VMs, image cache, snippets, or Proxmox storage/network settings.
+
+Alternative: re-run bootstrap after review, or from a git checkout:
 
 ```bash
 cd proxmox-os-installer && sudo ./install.sh
-# Prints the selected command (pveosi, pve-osi, or proxmox-os-installer only).
 ```
 
 ## Create a VM
@@ -56,6 +78,7 @@ pveosi --check-upstream             # probe official manifest/image URLs (no ful
 pveosi --cache-list                 # list checksum-verified cache files and usage
 pveosi --cache-prune                # preview obsolete cache entries; confirm before delete
 pveosi --version
+pveosi update [--check|--ref REF|--yes]
 # Equivalent: pve-osi … or proxmox-os-installer …
 ```
 

@@ -3,9 +3,10 @@
 set -Eeuo pipefail
 umask 077
 
-VERSION="0.2.2"
+VERSION="0.2.3"
 SELF="$(readlink -f -- "${BASH_SOURCE[0]}")"
 ROOT="$(cd -- "$(dirname -- "$SELF")/.." && pwd -P)"
+UPDATE_ENGINE="${ROOT}/lib/update_engine.py"
 CATALOG="${ROOT}/catalog/os-images.tsv"
 CHECKER="${ROOT}/lib/image_catalog.py"
 PREFLIGHT="${ROOT}/lib/preflight.py"
@@ -62,6 +63,9 @@ int_range() {
 }
 
 case "${1:-}" in
+  update)
+    exec python3 "$UPDATE_ENGINE" update "${@:2}"
+    ;;
   --version) printf '%s\n' "$VERSION"; exit 0 ;;
   --list-os)
     python3 "$CHECKER" catalog-check "$CATALOG" >/dev/null || exit 1
@@ -81,7 +85,7 @@ case "${1:-}" in
     ;;
   --dry-run) DRY_RUN=1 ;;
   '') ;;
-  *) error 'Usage: proxmox-os-installer [--version|--list-os|--check-catalog|--check-upstream|--cache-list|--cache-prune|--dry-run]' ;;
+  *) error 'Usage: proxmox-os-installer [update [--check|--ref REF|--yes]|--version|--list-os|--check-catalog|--check-upstream|--cache-list|--cache-prune|--dry-run]' ;;
 esac
 
 (( EUID == 0 )) || error 'Run as root on a Proxmox VE node.'

@@ -16,7 +16,7 @@ jobs:
         run: sudo apt-get update -qq && sudo apt-get install -y -qq shellcheck
       - name: Check Bash syntax
         run: |
-          bash -n bootstrap.sh install.sh bin/proxmox-os-installer tests/test_bootstrap.sh
+          bash -n bootstrap.sh install.sh bin/proxmox-os-installer tests/test_bootstrap.sh tests/test_update.sh
           bash -n tests/test_dry_run.sh tests/test_provision.sh tests/test_provision_flow.sh tests/test_provision_failures.sh tests/test_credential_leak.sh tests/test_firstboot_ssh.sh
       - name: ShellCheck
         run: shellcheck -e SC1091 bin/proxmox-os-installer install.sh lib/common.sh lib/interactive.sh lib/install_aliases.sh
@@ -24,6 +24,8 @@ jobs:
         run: sudo bash tests/test_bootstrap.sh
       - name: Install alias collision tests
         run: bash tests/test_install_aliases.sh
+      - name: Self-update regression tests
+        run: bash tests/test_update.sh
       - name: Python unit tests
         run: python3 -m unittest discover -s tests -p 'test_*.py' -v
       - name: Dry-run mock (no VM created)
