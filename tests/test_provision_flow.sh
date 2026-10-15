@@ -18,7 +18,7 @@ printf '%s\n' "$*" >> "$LOG"
 case "$1" in
   config)
     if [[ ! -f "$CFG" ]]; then
-      printf 'Configuration file does not exist\n' >&2
+      printf "Configuration file 'nodes/pve/qemu-server/301.conf' does not exist\n" >&2
       exit 2
     fi
     cat "$CFG"
@@ -41,6 +41,12 @@ EOF
 cp "$REPO/tests/lib/mock_pvesm.sh" "$TMP/bin/pvesm"
 cat > "$TMP/bin/pvesh" <<'EOF'
 #!/usr/bin/env bash
+case "$1" in get)
+  case "$2" in
+    /cluster/resources*) printf '[]\n'; exit 0 ;;
+    /cluster/nextid*) printf '"301"\n'; exit 0 ;;
+  esac ;;
+esac
 printf '"301"\n'
 EOF
 cat > "$TMP/bin/ip" <<'EOF'

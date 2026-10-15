@@ -10,10 +10,7 @@ cat > "$TMP/bin/qm" <<'EOF'
 case "$1" in config) printf 'does not exist\n' >&2; exit 2;; *) echo 'Unexpected mutation via qm' >&2; exit 98;; esac
 EOF
 cp "$REPO/tests/lib/mock_pvesm.sh" "$TMP/bin/pvesm"
-cat > "$TMP/bin/pvesh" <<'EOF'
-#!/usr/bin/env bash
-printf '"152"\n'
-EOF
+cp "$REPO/tests/lib/mock_pvesh.sh" "$TMP/bin/pvesh"
 cat > "$TMP/bin/ip" <<'EOF'
 #!/usr/bin/env bash
 [[ "$*" == 'link show dev vmbr0' ]]

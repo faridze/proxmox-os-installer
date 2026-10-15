@@ -91,7 +91,9 @@ python3 "$CHECKER" catalog-check "$CATALOG" >/dev/null || error 'OS catalog is i
 # shellcheck source=lib/interactive.sh
 source "$LIB/interactive.sh"
 
-printf 'Proxmox OS Installer v%s%s\n\n' "$VERSION" "$([[ "$DRY_RUN" == 1 ]] && printf ' (DRY RUN)' || true)"
+DRY_SUFFIX=""
+if [[ "$DRY_RUN" == 1 ]]; then DRY_SUFFIX=' (DRY RUN)'; fi
+printf 'Proxmox OS Installer v%s%s\n\n' "$VERSION" "$DRY_SUFFIX"
 select_os_entry
 
 NEXT_ID="$(pvesh get /cluster/nextid --output-format json 2>/dev/null | tr -d '"[:space:]' || true)"
@@ -99,8 +101,8 @@ NEXT_ID="$(pvesh get /cluster/nextid --output-format json 2>/dev/null | tr -d '"
 VMID="$(ask 'VM ID' "$NEXT_ID")"
 int_range "$VMID" 'VM ID' 100 999999999
 assert_vmid_free
-NAME="$(ask 'VM name' "${OS_ID}-${VMID}")"
-[[ "$NAME" =~ ^[a-zA-Z0-9][a-zA-Z0-9.-]{0,62}$ ]] || error 'Invalid VM name.'
+VM_NAME="$(ask 'VM name' "${OS_ID}-${VMID}")"
+[[ "$VM_NAME" =~ ^[a-zA-Z0-9][a-zA-Z0-9.-]{0,62}$ ]] || error 'Invalid VM name.'
 CORES="$(ask 'CPU cores' 8)"
 RAM_GIB="$(ask 'RAM (GiB)' 24)"
 DISK_GIB="$(ask 'Disk (GiB)' 150)"
@@ -189,7 +191,7 @@ python3 "$PREFLIGHT" image-validate "$CACHED_IMAGE" "$DISK_GIB" >/dev/null || \
 assert_vmid_free
 
 stage 'VM creation'
-qm_run "create VM ${VMID}" create "$VMID" --name "$NAME" --cores "$CORES" --cpu host \
+qm_run "create VM ${VMID}" create "$VMID" --name "$VM_NAME" --cores "$CORES" --cpu host \
   --memory "$RAM_MIB" --net0 "$NIC" --scsihw virtio-scsi-single \
   --serial0 socket --vga serial0 --agent enabled=1 --ostype l26
 CREATED=1

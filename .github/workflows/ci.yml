@@ -12,17 +12,14 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
+      - name: Install ShellCheck
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq shellcheck
       - name: Check Bash syntax
         run: |
           bash -n bootstrap.sh install.sh bin/proxmox-os-installer
-          bash -n tests/test_dry_run.sh tests/test_provision.sh tests/test_provision_flow.sh
-      - name: ShellCheck (optional)
-        run: |
-          if command -v shellcheck >/dev/null 2>&1; then
-            shellcheck -e SC1091 bin/proxmox-os-installer lib/common.sh lib/interactive.sh || true
-          else
-            echo "shellcheck not installed; skipping"
-          fi
+          bash -n tests/test_dry_run.sh tests/test_provision.sh tests/test_provision_flow.sh tests/test_provision_failures.sh tests/test_credential_leak.sh
+      - name: ShellCheck
+        run: shellcheck -e SC1091 bin/proxmox-os-installer lib/common.sh lib/interactive.sh
       - name: Python unit tests
         run: python3 -m unittest discover -s tests -p 'test_*.py' -v
       - name: Dry-run mock (no VM created)
@@ -33,11 +30,7 @@ jobs:
           sudo bash tests/test_provision_flow.sh
           sudo bash tests/test_provision_failures.sh
           sudo bash tests/test_credential_leak.sh
-      - name: ShellCheck
-        run: |
-          sudo apt-get update -qq && sudo apt-get install -y -qq shellcheck
-          shellcheck -e SC1091 bin/proxmox-os-installer lib/common.sh lib/interactive.sh
-      - name: Upstream check (network)
+      - name: Upstream check (network, non-blocking)
         run: |
           python3 lib/image_catalog.py check-upstream catalog/os-images.tsv || \
             echo "Upstream check failed (network or mirror); offline tests still passed."

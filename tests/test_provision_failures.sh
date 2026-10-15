@@ -26,6 +26,12 @@ EOF
   cp "$REPO/tests/lib/mock_pvesm.sh" "$TMP/bin/pvesm"
   cat > "$TMP/bin/pvesh" <<'EOF'
 #!/usr/bin/env bash
+case "$1" in get)
+  case "$2" in
+    /cluster/resources*) printf '[]\n'; exit 0 ;;
+    /cluster/nextid*) printf '"401"\n'; exit 0 ;;
+  esac ;;
+esac
 printf '"401"\n'
 EOF
   cat > "$TMP/bin/ip" <<'EOF'

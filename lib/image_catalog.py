@@ -86,7 +86,7 @@ class UpstreamNetworkError(RuntimeError):
 
 
 MAX_MANIFEST_BYTES = 2 * 1024 * 1024
-USER_AGENT = "proxmox-os-installer/0.2.0"
+USER_AGENT = "proxmox-os-installer/0.2.1"
 
 
 def _head_url(url, timeout=20):
@@ -142,15 +142,21 @@ def check_upstream(catalog_path):
             print(f"FAIL {os_id}: checksum manifest HTTP {status} ({manifest_url})")
             failures += 1
             continue
+        digest_ok = False
+        tmp_path = None
         try:
             with tempfile.NamedTemporaryFile(delete=False) as tmp:
                 tmp.write(body)
                 tmp_path = tmp.name
             find_digest(tmp_path, image, algo)
-            Path(tmp_path).unlink(missing_ok=True)
+            digest_ok = True
         except (ValueError, OSError) as exc:
             print(f"FAIL {os_id}: manifest digest for {image}: {exc}")
             failures += 1
+        finally:
+            if tmp_path:
+                Path(tmp_path).unlink(missing_ok=True)
+        if not digest_ok:
             continue
         try:
             i_status = _head_url(image_url)

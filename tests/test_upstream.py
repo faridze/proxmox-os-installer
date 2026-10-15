@@ -29,6 +29,41 @@ class UpstreamTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     catalog.check_upstream(BASE / "catalog/os-images.tsv")
 
+    def test_malformed_manifest_cleans_temp_files(self):
+        created_paths = []
+        real_named = tempfile.NamedTemporaryFile
+
+        def tracking_named(*args, **kwargs):
+            handle = real_named(*args, **kwargs)
+            created_paths.append(handle.name)
+            return handle
+
+        def fake_download(url):
+            return 200, b"invalid\n"
+
+        with mock.patch.object(tempfile, "NamedTemporaryFile", tracking_named):
+            with mock.patch.object(catalog, "_download_manifest", side_effect=fake_download):
+                with mock.patch.object(catalog, "_head_url", return_value=200):
+                    with mock.patch.object(
+                        catalog,
+                        "load_catalog",
+                        return_value=[
+                            [
+                                "debian-12",
+                                "Debian 12",
+                                "debian",
+                                "https://example.invalid",
+                                "debian-12-genericcloud-amd64.qcow2",
+                                "SHA512SUMS",
+                                "sha512",
+                            ]
+                        ],
+                    ):
+                        with self.assertRaises(ValueError):
+                            catalog.check_upstream(BASE / "catalog/os-images.tsv")
+        for path in created_paths:
+            self.assertFalse(Path(path).exists(), f"leftover manifest temp file: {path}")
+
     def test_ok_with_manifest_and_head(self):
         digest = "a" * 128
         body = f"{digest}  debian-12-genericcloud-amd64.qcow2\n".encode()
@@ -38,8 +73,6 @@ class UpstreamTests(unittest.TestCase):
 
         with mock.patch.object(catalog, "_download_manifest", side_effect=fake_download):
             with mock.patch.object(catalog, "_head_url", return_value=200):
-                # Only first catalog entry needs to pass; mock all with same body works for debian-12
-                # but other images will fail - patch load to one entry
                 with mock.patch.object(
                     catalog,
                     "load_catalog",

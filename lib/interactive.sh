@@ -1,10 +1,12 @@
+# shellcheck shell=bash
 # Interactive prompts (two-level OS menu, storage/bridge discovery)
+# Sets catalog globals in the sourcing installer: OS_ID, OS_LABEL, DEFAULT_USER, BASE_URL, IMAGE_FILE, SUMS_FILE, ALGO.
 
 select_os_entry() {
-  local -a families=() family_line family_key family_label count
+  local -a families=() family_line family_key family_label
   mapfile -t family_lines < <(python3 "$CHECKER" distro-groups "$CATALOG")
   for family_line in "${family_lines[@]}"; do
-    IFS='|' read -r family_key family_label count <<< "$family_line"
+    IFS='|' read -r family_key family_label _family_count <<< "$family_line"
     families+=("$family_key")
     printf '%2d) %s\n' "${#families[@]}" "$family_label"
   done
@@ -21,12 +23,13 @@ select_os_entry() {
   local ver_pick
   ver_pick="$(ask 'Select version number' '1')"
   int_range "$ver_pick" 'Version' 1 "${#version_entries[@]}"
+  # shellcheck disable=SC2034 # consumed by bin/proxmox-os-installer after source
   IFS='|' read -r OS_ID OS_LABEL DEFAULT_USER BASE_URL IMAGE_FILE SUMS_FILE ALGO <<< "${version_entries[$((10#$ver_pick - 1))]}"
 }
 
 pick_storage() {
   printf '\nActive storages supporting VM images:\n'
-  local line default
+  local default
   default="$(python3 "$PREFLIGHT" default-storage 2>/dev/null || printf 'local-lvm')"
   while IFS='|' read -r name typ avail; do
     printf '  - %s (%s, ~%s GiB free)\n' "$name" "$typ" "$avail"
@@ -84,7 +87,7 @@ collect_auth() {
 print_summary() {
   printf '\n--------- VM SUMMARY ---------\n'
   printf 'OS: %s\nVM: %s (%s)\nCPU: %s\nRAM: %s GiB\nDisk: %s GiB @ %s\nNIC: %s\nIP: %s\nUser: %s\n' \
-    "$OS_LABEL" "$VMID" "$NAME" "$CORES" "$RAM_GIB" "$DISK_GIB" "$STORAGE" "$NIC" "$IP_CONFIG" "$USERNAME"
+    "$OS_LABEL" "$VMID" "$VM_NAME" "$CORES" "$RAM_GIB" "$DISK_GIB" "$STORAGE" "$NIC" "$IP_CONFIG" "$USERNAME"
   if [[ -n "$SSH_PUBKEY" || "${SSH_INLINE_VALIDATED:-0}" == 1 ]]; then
     printf 'SSH key: configured\n'
   else

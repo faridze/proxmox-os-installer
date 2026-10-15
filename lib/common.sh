@@ -1,3 +1,4 @@
+# shellcheck shell=bash
 # Shared shell helpers for proxmox-os-installer
 error() { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
 info() { printf '\n==> [%s] %s\n' "$STAGE_LABEL" "$*"; }
@@ -54,18 +55,15 @@ qm_run() {
 
 # Documented Proxmox mechanism; password still visible in process list while qm runs.
 qm_set_cloud_init_password() {
-  local vmid="$1"
-  local stderr_file rc=0
+  local vmid="$1" stderr_file rc=0
   stderr_file="$(mktemp)"
   chmod 0600 "$stderr_file"
   qm set "$vmid" --cipassword "$PASSWORD" >/dev/null 2>"$stderr_file" || rc=$?
-  if (( rc != 0 )); then
-    local detail
-    detail="$(_sanitize_proxmox_stderr "$stderr_file")"
-    rm -f -- "$stderr_file"
-    provisioning_failed "cloud-init login password configuration for VM ${vmid}" "$detail"
-  fi
   rm -f -- "$stderr_file"
+  if (( rc != 0 )); then
+    provisioning_failed "cloud-init login password configuration for VM ${vmid}" \
+      "Proxmox qm exited with status ${rc}. Command output suppressed to avoid leaking credentials."
+  fi
 }
 
 assert_vmid_free() {

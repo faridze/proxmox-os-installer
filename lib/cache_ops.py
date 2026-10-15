@@ -15,6 +15,7 @@ _spec.loader.exec_module(_catalog)
 
 LOCK_SUFFIX = ".lock"
 TEMP_PREFIXES = (".image.", ".checksums.")
+PRUNE_GLOBAL_LOCK = ".prune.lock"
 
 
 def expected_cache_name(os_id, image_file):
@@ -28,8 +29,10 @@ def is_temp_in_progress(path: Path) -> bool:
 def resolve_cache_path(cache_dir: Path, name: str) -> Path:
     root = cache_dir.resolve()
     candidate = (root / name).resolve()
-    if not str(candidate).startswith(str(root) + os.sep) and candidate != root:
+    if not str(candidate).startswith(str(root) + os.sep):
         raise ValueError(f"refusing path outside cache: {name}")
+    if candidate.is_symlink():
+        raise ValueError(f"refusing symlink in cache: {name}")
     return candidate
 
 
@@ -37,25 +40,49 @@ class CacheLockBusy(OSError):
     """Another process holds the cache lock."""
 
 
+def lock_is_busy(lock_path: Path) -> bool:
+    try:
+        fd = os.open(lock_path, os.O_RDWR)
+    except OSError:
+        return True
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        return False
+    except BlockingIOError:
+        return True
+    finally:
+        os.close(fd)
+
+
+def any_provisioning_lock_busy(cache_dir: Path) -> bool:
+    for lock in cache_dir.glob(f"*{LOCK_SUFFIX}"):
+        if lock.name == PRUNE_GLOBAL_LOCK:
+            continue
+        if lock_is_busy(lock):
+            return True
+    return False
+
+
 @contextmanager
 def hold_cache_lock(lock_path: Path, blocking: bool = True):
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+    locked = False
     try:
         flags = fcntl.LOCK_EX
         if not blocking:
             flags |= fcntl.LOCK_NB
         try:
             fcntl.flock(fd, flags)
+            locked = True
         except BlockingIOError:
-            os.close(fd)
             raise CacheLockBusy(f"lock busy: {lock_path.name}") from None
         yield
     finally:
-        try:
+        if locked:
             fcntl.flock(fd, fcntl.LOCK_UN)
-        finally:
-            os.close(fd)
+        os.close(fd)
 
 
 def human_size(num):
@@ -72,12 +99,15 @@ def human_size(num):
 def catalog_expected(catalog_path):
     entries = _catalog.load_catalog(catalog_path)
     by_file = {expected_cache_name(e[0], e[4]): e for e in entries}
-    by_os = {e[0]: e for e in entries}
-    return by_file, by_os
+    return by_file
 
 
 def prune_reason(path: Path, expected_map: dict) -> str | None:
+    if not path.is_file() or path.is_symlink():
+        return None
     if is_temp_in_progress(path) or path.name.endswith(LOCK_SUFFIX):
+        return None
+    if path.name.startswith(".") and path.name != PRUNE_GLOBAL_LOCK:
         return None
     if path.name not in expected_map:
         return "not listed in current catalog"
@@ -92,13 +122,13 @@ def os_id_for_cache_file(filename: str, expected_map: dict) -> str | None:
 
 
 def list_cache(cache_dir, catalog_path):
-    expected_map, _ = catalog_expected(catalog_path)
+    expected_map = catalog_expected(catalog_path)
     cache_dir = Path(cache_dir)
     cache_dir.mkdir(parents=True, exist_ok=True)
     rows = []
     total = 0
     for p in sorted(cache_dir.iterdir()):
-        if not p.is_file() or p.name.endswith(LOCK_SUFFIX) or is_temp_in_progress(p):
+        if not p.is_file() or p.is_symlink() or p.name.endswith(LOCK_SUFFIX) or is_temp_in_progress(p):
             continue
         size = p.stat().st_size
         total += size
@@ -118,11 +148,15 @@ def list_cache(cache_dir, catalog_path):
 def collect_prune_candidates(cache_dir: Path, expected_map: dict) -> list[tuple[Path, str]]:
     out = []
     for p in sorted(cache_dir.iterdir()):
-        if not p.is_file():
+        if p.is_symlink() or not p.is_file():
             continue
-        reason = prune_reason(p, expected_map)
+        try:
+            path = resolve_cache_path(cache_dir, p.name)
+        except ValueError:
+            continue
+        reason = prune_reason(path, expected_map)
         if reason:
-            out.append((p, reason))
+            out.append((path, reason))
     return out
 
 
@@ -130,9 +164,16 @@ def delete_under_lock(cache_dir: Path, path: Path, expected_map: dict, reason: s
     """Delete one cache file while holding the relevant provisioning lock."""
     path = resolve_cache_path(cache_dir, path.name)
     os_id = os_id_for_cache_file(path.name, expected_map)
-    lock_path = cache_dir / f"{os_id}.lock" if os_id else cache_dir / ".prune.lock"
+    if os_id:
+        lock_path = cache_dir / f"{os_id}.lock"
+    else:
+        if any_provisioning_lock_busy(cache_dir):
+            return False
+        lock_path = cache_dir / PRUNE_GLOBAL_LOCK
     try:
         with hold_cache_lock(lock_path, blocking=False):
+            if any_provisioning_lock_busy(cache_dir):
+                return False
             if not path.is_file():
                 return False
             current_reason = prune_reason(path, expected_map)
@@ -148,7 +189,7 @@ def delete_under_lock(cache_dir: Path, path: Path, expected_map: dict, reason: s
 
 
 def prune_cache(cache_dir, catalog_path, apply=False):
-    expected_map, _ = catalog_expected(catalog_path)
+    expected_map = catalog_expected(catalog_path)
     cache_dir = Path(cache_dir).resolve()
     cache_dir.mkdir(parents=True, exist_ok=True)
     candidates = collect_prune_candidates(cache_dir, expected_map)

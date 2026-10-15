@@ -34,10 +34,7 @@ base_mocks() {
   mkdir -p "$TMP/bin"
   write_qm_mock
   cp "$REPO/tests/lib/mock_pvesm.sh" "$TMP/bin/pvesm"
-  cat > "$TMP/bin/pvesh" <<'EOF'
-#!/usr/bin/env bash
-printf '"200"\n'
-EOF
+  cp "$REPO/tests/lib/mock_pvesh.sh" "$TMP/bin/pvesh"
   cat > "$TMP/bin/ip" <<'EOF'
 #!/usr/bin/env bash
 [[ "$*" == 'link show dev vmbr0' ]]
@@ -68,13 +65,25 @@ run_dry basic
 grep -q 'Stage 1/8' "$TMP/out-basic.txt"
 grep -q 'DRY RUN' "$TMP/out-basic.txt"
 
-# Existing VM ID rejection
-export QM_CONFIG_RC=0
+# Existing VM ID rejection (cluster resources reports vmid 200 in use)
+cat > "$TMP/bin/pvesh" <<'EOF'
+#!/usr/bin/env bash
+case "$1" in get)
+  case "$2" in
+    /cluster/resources*) printf '[{"vmid":200}]\n'; exit 0 ;;
+    /cluster/nextid*) printf '"200"\n'; exit 0 ;;
+  esac ;;
+esac
+printf '"200"\n'
+EOF
+chmod +x "$TMP/bin/pvesh"
+export PATH="$TMP/bin:$PATH"
 if inputs_default | "$REPO/bin/proxmox-os-installer" --dry-run 2>"$TMP/exists.err"; then
   echo 'expected failure for existing VMID' >&2; exit 1
 fi
 grep -q 'already in use' "$TMP/exists.err"
-unset QM_CONFIG_RC
+cp "$REPO/tests/lib/mock_pvesh.sh" "$TMP/bin/pvesh"
+chmod +x "$TMP/bin/pvesh"
 
 # Storage validation failure
 cat > "$TMP/bin/pvesm" <<'EOF'

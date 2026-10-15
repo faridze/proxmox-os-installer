@@ -10,13 +10,13 @@ from pathlib import Path
 
 THIN_TYPES = frozenset({"lvmthin", "zfspool", "rbd", "nfs"})
 
-FREE_VMID_HINTS = (
-    "does not exist",
-    "not exist",
-    "no such file",
-    "unable to find configuration",
-    "configuration file",
-    "not found",
+MISSING_VMID_CONF = re.compile(
+    r"configuration file\s+'[^']*/(\d+)\.conf'\s+does not exist",
+    re.IGNORECASE,
+)
+MISSING_VMID_ALT = re.compile(
+    r"qemu-server/(\d+)\.conf.*does not exist",
+    re.IGNORECASE,
 )
 
 
@@ -32,10 +32,45 @@ def _run_json(cmd):
         raise RuntimeError(f"command failed: {' '.join(cmd)} ({exc})") from exc
 
 
+def _vmid_from_cluster_resources(vmid):
+    r = subprocess.run(
+        ["pvesh", "get", "/cluster/resources", "--type", "vm", "--output-format", "json"],
+        capture_output=True,
+        text=True,
+    )
+    if r.returncode != 0:
+        return None
+    try:
+        resources = json.loads(r.stdout or "[]")
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(resources, list):
+        return None
+    vid = str(vmid)
+    for item in resources:
+        if str(item.get("vmid")) == vid:
+            return "in_use"
+    return "free"
+
+
+def _qm_config_indicates_missing(vmid, stderr, stdout):
+    text = f"{stderr or ''}\n{stdout or ''}"
+    for pattern in (MISSING_VMID_CONF, MISSING_VMID_ALT):
+        match = pattern.search(text)
+        if match and match.group(1) == str(vmid):
+            return True
+    return False
+
+
 def vmid_availability(vmid):
     """Return 'free', 'in_use', or raise VmidAvailabilityError when uncertain."""
     if not str(vmid).isdigit():
         raise VmidAvailabilityError("invalid VM ID")
+
+    cluster_state = _vmid_from_cluster_resources(vmid)
+    if cluster_state is not None:
+        return cluster_state
+
     r = subprocess.run(
         ["qm", "config", str(vmid)],
         capture_output=True,
@@ -43,8 +78,7 @@ def vmid_availability(vmid):
     )
     if r.returncode == 0:
         return "in_use"
-    text = f"{r.stderr or ''}\n{r.stdout or ''}".lower()
-    if any(hint in text for hint in FREE_VMID_HINTS):
+    if _qm_config_indicates_missing(vmid, r.stderr, r.stdout):
         return "free"
     raise VmidAvailabilityError(
         (r.stderr or r.stdout or "qm config failed").strip() or "qm config failed"
