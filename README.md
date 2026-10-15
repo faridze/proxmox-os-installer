@@ -2,7 +2,7 @@
 
 Fast interactive cloud-image VM provisioning for **Proxmox VE 8+ (x86_64)**. Build Debian, Ubuntu, AlmaLinux, or Rocky Linux VMs without running the ISO installer. Uses official upstream images, cloud-init, and Proxmox `qm` with any active image-capable storage (including `local-lvm`).
 
-> **Status: v0.2.0.** Offline mocked tests cover provisioning safety paths; **no supported OS has been fully boot-tested in CI** (CI never creates a real VM). Validate on a lab node using [docs/MANUAL_VALIDATION.md](docs/MANUAL_VALIDATION.md) before production use.
+> **Status: v0.2.2 (experimental first-boot SSH password support).** Offline mocked tests cover provisioning safety paths; **no supported OS has been fully boot-tested in CI** (CI never creates a real VM). Validate on a lab node using [docs/MANUAL_VALIDATION.md](docs/MANUAL_VALIDATION.md) before production use.
 
 ## Quick install from GitHub (on a Proxmox node, as root)
 

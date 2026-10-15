@@ -17,7 +17,7 @@ jobs:
       - name: Check Bash syntax
         run: |
           bash -n bootstrap.sh install.sh bin/proxmox-os-installer
-          bash -n tests/test_dry_run.sh tests/test_provision.sh tests/test_provision_flow.sh tests/test_provision_failures.sh tests/test_credential_leak.sh
+          bash -n tests/test_dry_run.sh tests/test_provision.sh tests/test_provision_flow.sh tests/test_provision_failures.sh tests/test_credential_leak.sh tests/test_firstboot_ssh.sh
       - name: ShellCheck
         run: shellcheck -e SC1091 bin/proxmox-os-installer install.sh lib/common.sh lib/interactive.sh lib/install_aliases.sh
       - name: Install alias collision tests
@@ -32,6 +32,7 @@ jobs:
           sudo bash tests/test_provision_flow.sh
           sudo bash tests/test_provision_failures.sh
           sudo bash tests/test_credential_leak.sh
+          sudo bash tests/test_firstboot_ssh.sh
       - name: Upstream check (network, non-blocking)
         run: |
           python3 lib/image_catalog.py check-upstream catalog/os-images.tsv || \

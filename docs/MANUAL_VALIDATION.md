@@ -31,3 +31,11 @@ Run on a **non-production** Proxmox VE 8+ node after installing from your featur
 - Interrupt download (Ctrl+C) → no automatic VM deletion; cache lock released.
 
 Record Proxmox version, node name, storage type, and date in the table before marking a row complete.
+
+## New in v0.2.2: password SSH / optional root SSH first boot
+
+Only on a **fresh disposable VM**: skip SSH public key, set a password, accept password SSH, explicitly opt into root SSH if desired, and choose an active snippets storage (e.g., local with snippets enabled). Inspect `qm config VMID` for `cicustom: user=STORAGE:snippets/pveosi-VMID-user.yaml`. Check that the snippet is `0600` and the `user` field matches the selected login. Before marking PASS, wait for `cloud-init status --wait`, then confirm `sshd -T | grep -Ei 'passwordauthentication|permitrootlogin'` inside the guest and test a real password login from an allowed management IP.
+
+If testing root SSH, confirm that the **root account has a usable password** and login works after boot; do not infer success solely from `qm config`. Ensure SSH port 22 is firewalled from the public Internet. Verify guest log shows no cloud-init failures. For existing booted VMs, configure via guest console/SSH; Cloud-Init settings are not generally replayed on reboot.
+
+Do not delete the attached `snippets` file: the VM needs it for subsequent starts/migration, and VM deletion does not automatically clean it up.
