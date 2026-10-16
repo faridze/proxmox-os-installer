@@ -94,10 +94,9 @@ class GuestHardeningTests(unittest.TestCase):
         (self.root / "proc/sys/kernel/random/boot_id").write_text(f"{BOOT_B}\n", encoding="utf-8")
         with mock.patch("builtins.input", return_value="yes"):
             guest.cmd_verify(interactive=True)
-        (self.root / "proc/sys/kernel/random/boot_id").write_text(f"{BOOT_A}\n", encoding="utf-8")
         guest.cmd_prepare(dry_run=False)
         st = json.loads((self.root / "var/lib/pveosi-guest-setup/state.json").read_text())
-        self.assertTrue(st["verified"])
+        self.assertTrue(st["machine_verified"])
         self.assertEqual(st["phase"], "verified")
 
     def test_user_managed_dest_without_provenance(self):
@@ -134,13 +133,13 @@ class GuestHardeningTests(unittest.TestCase):
 
     def test_static_ip_change_fails(self):
         b = gnw.NetworkFacts(
-            interfaces=[gnw.IfaceFacts("eth0", ["10.0.0.2/24"], False)],
+            interfaces=[gnw.IfaceFacts("eth0", ["10.0.0.2/24"], "static")],
             default_gw="10.0.0.1",
             default_dev="eth0",
             default_metric=None,
         )
         a = gnw.NetworkFacts(
-            interfaces=[gnw.IfaceFacts("eth0", ["10.0.0.3/24"], False)],
+            interfaces=[gnw.IfaceFacts("eth0", ["10.0.0.3/24"], "static")],
             default_gw="10.0.0.1",
             default_dev="eth0",
             default_metric=None,
@@ -148,7 +147,9 @@ class GuestHardeningTests(unittest.TestCase):
         r = gnw.compare_network_facts(b, a)
         self.assertFalse(r.ok)
 
-    def test_gateway_change_fails(self):
+    def test_gateway_change_on_static_fails(self):
+        static_netplan = NETPLAN.replace("dhcp4: true", "addresses: [10.0.0.2/24]")
+        (self.root / "etc/netplan/50-cloud-init.yaml").write_text(static_netplan, encoding="utf-8")
         b = gnw.capture_network_facts()
         os.environ["PVEOSI_GUEST_MOCK_IPJ_ROUTE"] = '[{"dst":"default","gateway":"10.0.0.9","dev":"eth0"}]'
         a = gnw.capture_network_facts()

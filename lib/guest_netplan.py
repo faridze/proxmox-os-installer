@@ -9,9 +9,10 @@ import re
 import shutil
 import subprocess
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Iterator, Optional
 
 try:
     import yaml
@@ -20,8 +21,17 @@ except ImportError:  # pragma: no cover
 
 DEST_NAME = "90-pveosi-static.yaml"
 PROVENANCE_NAME = "pveosi-netplan-migration.json"
+LOCK_NAME = ".netplan-migration.lock"
 CLOUD_INIT_NAME_RE = re.compile(r"cloud[-_]?init", re.I)
 PVEOSI_TMP_SUFFIX = ".pveosi-migrate.tmp"
+PROVENANCE_REQUIRED_KEYS = (
+    "version",
+    "source_name",
+    "source_sha256",
+    "dest_name",
+    "dest_sha256",
+    "retired_name",
+)
 
 
 class NetplanSafetyError(Exception):
@@ -61,6 +71,10 @@ def provenance_path() -> Path:
     return backup_dir() / PROVENANCE_NAME
 
 
+def lock_path() -> Path:
+    return backup_dir() / LOCK_NAME
+
+
 def _sha256_bytes(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
@@ -79,6 +93,11 @@ def _safe_path_in_netplan(path: Path) -> None:
     base = netplan_dir().resolve()
     if not str(resolved).startswith(str(base) + os.sep) and resolved != base:
         raise NetplanSafetyError(f"Path escapes netplan directory: {path.name}")
+
+
+def _safe_private_path(path: Path) -> None:
+    if path.is_symlink():
+        raise NetplanSafetyError(f"Refusing symlink: {path.name}")
 
 
 def _load_yaml(text: str, label: str) -> dict[str, Any]:
@@ -182,38 +201,92 @@ def inspect_netplan() -> NetplanInspect:
     )
 
 
+def _validate_provenance_record(data: dict[str, Any]) -> None:
+    if data.get("version") != 1:
+        raise NetplanSafetyError("Invalid netplan migration provenance version.")
+    for key in PROVENANCE_REQUIRED_KEYS:
+        if not data.get(key):
+            raise NetplanSafetyError(f"Invalid netplan migration provenance (missing {key}).")
+    if data.get("dest_name") != DEST_NAME:
+        raise NetplanSafetyError("Invalid netplan migration provenance dest_name.")
+
+
 def read_provenance() -> Optional[dict[str, Any]]:
     path = provenance_path()
     if not path.is_file():
         return None
-    if path.is_symlink():
-        raise NetplanSafetyError("Provenance file is a symlink; refusing.")
+    _safe_private_path(path)
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except json.JSONDecodeError as exc:
         raise NetplanSafetyError("Corrupt netplan migration provenance.") from exc
-    if not isinstance(data, dict) or data.get("version") != 1:
+    if not isinstance(data, dict):
         raise NetplanSafetyError("Invalid netplan migration provenance.")
+    _validate_provenance_record(data)
     return data
 
 
-def _write_provenance(data: dict[str, Any]) -> None:
-    payload = (json.dumps(data, indent=2) + "\n").encode("utf-8")
-    _atomic_write_private(provenance_path(), payload)
+def provenance_fingerprint() -> Optional[str]:
+    prov = read_provenance()
+    if not prov:
+        return None
+    dest = netplan_dir() / DEST_NAME
+    if not dest.is_file():
+        return None
+    payload = {
+        "dest_sha256": prov.get("dest_sha256"),
+        "source_sha256": prov.get("source_sha256"),
+        "retired_name": prov.get("retired_name"),
+        "dest_file_sha256": _sha256_file(dest),
+    }
+    return _sha256_bytes(json.dumps(payload, sort_keys=True).encode("utf-8"))
 
 
-def _atomic_write_private(path: Path, data: bytes) -> None:
+def detect_interrupted_transactions() -> list[str]:
+    issues: list[str] = []
+    np = netplan_dir()
+    if np.is_dir():
+        for p in np.glob(f"*{PVEOSI_TMP_SUFFIX}"):
+            if p.exists():
+                issues.append(f"Interrupted netplan transaction: {p.name}")
+    bdir = backup_dir()
+    if bdir.is_dir():
+        dest = np / DEST_NAME if np.is_dir() else None
+        prov = provenance_path()
+        retired = list(bdir.glob("*.retired"))
+        if dest and dest.is_file() and not prov.is_file() and retired:
+            issues.append("Netplan source retired but provenance not written.")
+        if prov.is_file() and dest and not dest.is_file():
+            issues.append("Provenance present but destination netplan file missing.")
+    return issues
+
+
+def _write_provenance_new(data: dict[str, Any]) -> None:
+    path = provenance_path()
     if path.exists():
-        _safe_path_in_netplan(path)
+        raise NetplanSafetyError("Provenance file already exists; refusing overwrite.")
+    _validate_provenance_record(data)
+    payload = (json.dumps(data, indent=2) + "\n").encode("utf-8")
+    _atomic_write_private(path, payload, create_only=True)
+
+
+def _atomic_write_private(path: Path, data: bytes, create_only: bool = False) -> None:
     parent = path.parent
     parent.mkdir(parents=True, exist_ok=True)
     if parent.stat().st_mode & 0o077:
         os.chmod(parent, 0o700)
+    if path.exists():
+        if create_only:
+            raise NetplanSafetyError(f"Refusing to overwrite existing file: {path.name}")
+        if path.parent == netplan_dir():
+            _safe_path_in_netplan(path)
+        else:
+            _safe_private_path(path)
     tmp = path.with_name(path.name + PVEOSI_TMP_SUFFIX)
     if tmp.exists():
-        if tmp.is_symlink():
-            raise NetplanSafetyError("Stale temporary file is a symlink; refusing.")
-        tmp.unlink()
+        raise NetplanSafetyError(
+            f"Interrupted transaction (temporary file {tmp.name} present); resolve manually."
+        )
     fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     try:
         os.write(fd, data)
@@ -224,14 +297,30 @@ def _atomic_write_private(path: Path, data: bytes) -> None:
     os.chmod(path, 0o600)
 
 
-def _cleanup_stale_tmp() -> None:
-    for p in netplan_dir().glob(f"*{PVEOSI_TMP_SUFFIX}"):
-        if p.is_file() and not p.is_symlink():
-            p.unlink()
+@contextmanager
+def migration_lock() -> Iterator[None]:
+    bdir = backup_dir()
+    bdir.mkdir(parents=True, exist_ok=True)
+    os.chmod(bdir, 0o700)
+    lock = lock_path()
+    if lock.exists():
+        raise NetplanSafetyError("Another netplan migration appears in progress.")
+    fd = os.open(lock, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    os.write(fd, str(os.getpid()).encode("ascii"))
+    os.close(fd)
+    try:
+        yield
+    finally:
+        try:
+            lock.unlink(missing_ok=True)
+        except OSError:
+            pass
 
 
 def migration_state() -> str:
     """Return: needs_migration | already_migrated | user_managed_dest | inconsistent."""
+    for issue in detect_interrupted_transactions():
+        raise NetplanSafetyError(issue)
     dest = netplan_dir() / DEST_NAME
     if dest.exists():
         _safe_path_in_netplan(dest)
@@ -242,19 +331,22 @@ def migration_state() -> str:
     has_source_candidate = any(
         CLOUD_INIT_NAME_RE.search(n) for n in names if n != DEST_NAME
     ) or any(
-        n != DEST_NAME and "cloud-init" in (netplan_dir() / n).read_text(encoding="utf-8").lower()[:200]
+        n != DEST_NAME
+        and "cloud-init" in (netplan_dir() / n).read_text(encoding="utf-8").lower()[:200]
         for n in names
         if (netplan_dir() / n).is_file()
     )
 
     if prov:
         retired = backup_dir() / str(prov.get("retired_name", ""))
+        _safe_private_path(retired)
         expected_hash = str(prov.get("dest_sha256", ""))
         if not has_dest:
             return "inconsistent"
         if _sha256_file(dest) != expected_hash:
             return "inconsistent"
-        if prov.get("dest_name") != DEST_NAME:
+        backup_src = backup_dir() / str(prov.get("source_name", ""))
+        if backup_src.is_file() and _sha256_file(backup_src) != str(prov.get("source_sha256", "")):
             return "inconsistent"
         if has_source_candidate:
             return "inconsistent"
@@ -279,7 +371,6 @@ def build_netplan_plan() -> NetplanPlan:
     state = migration_state()
     dest = netplan_dir() / DEST_NAME
     if state == "already_migrated":
-        prov = read_provenance() or {}
         return NetplanPlan(
             inspect=None,
             action="already_migrated",
@@ -331,6 +422,13 @@ def _normalize_effective(text: str) -> str:
     return "\n".join(lines)
 
 
+def _rollback_migration(dest: Path, source: Path, retired: Path) -> None:
+    if dest.exists() and dest.is_file():
+        dest.unlink()
+    if not source.exists() and retired.is_file():
+        shutil.move(str(retired), str(source))
+
+
 def migrate_netplan_independence(dry_run: bool = False) -> dict[str, str]:
     plan = build_netplan_plan()
     if plan.action == "already_migrated":
@@ -344,47 +442,48 @@ def migrate_netplan_independence(dry_run: bool = False) -> dict[str, str]:
             "bytes": str(len(plan.source_bytes)),
         }
 
-    _cleanup_stale_tmp()
-    assert plan.inspect
-    info = plan.inspect
-    source = info.source_path
-    dest = info.dest_path
-    before = netplan_get_effective()
-    bdir = backup_dir()
-    bdir.mkdir(parents=True, exist_ok=True)
-    os.chmod(bdir, 0o700)
+    with migration_lock():
+        assert plan.inspect
+        info = plan.inspect
+        source = info.source_path
+        dest = info.dest_path
+        before = netplan_get_effective()
+        bdir = backup_dir()
+        bdir.mkdir(parents=True, exist_ok=True)
+        os.chmod(bdir, 0o700)
 
-    backup_copy = bdir / source.name
-    if not backup_copy.exists():
-        shutil.copy2(source, backup_copy)
-        os.chmod(backup_copy, 0o600)
+        backup_copy = bdir / source.name
+        if backup_copy.exists():
+            if _sha256_file(backup_copy) != _sha256_bytes(plan.source_bytes):
+                raise NetplanSafetyError(
+                    f"Backup {backup_copy.name} exists with different content; refusing."
+                )
+        else:
+            shutil.copy2(source, backup_copy)
+            os.chmod(backup_copy, 0o600)
 
-    _atomic_write_private(dest, plan.source_bytes)
-    retired = bdir / f"{source.name}.retired"
-    shutil.move(str(source), str(retired))
-    os.chmod(retired, 0o600)
-
-    try:
-        netplan_generate_validate()
-        after = netplan_get_effective()
-        if _hash_text(_normalize_effective(before)) != _hash_text(_normalize_effective(after)):
-            raise NetplanSafetyError("Effective netplan configuration changed after migration.")
-        prov = {
-            "version": 1,
-            "source_name": source.name,
-            "source_sha256": _sha256_bytes(plan.source_bytes),
-            "dest_name": DEST_NAME,
-            "dest_sha256": _sha256_bytes(plan.source_bytes),
-            "retired_name": retired.name,
-            "migrated_at": int(time.time()),
-        }
-        _write_provenance(prov)
-    except NetplanSafetyError:
-        if dest.exists():
-            dest.unlink()
-        if not source.exists() and retired.exists():
-            shutil.move(str(retired), str(source))
-        raise
+        retired = bdir / f"{source.name}.retired"
+        try:
+            _atomic_write_private(dest, plan.source_bytes, create_only=True)
+            shutil.move(str(source), str(retired))
+            os.chmod(retired, 0o600)
+            netplan_generate_validate()
+            after = netplan_get_effective()
+            if _hash_text(_normalize_effective(before)) != _hash_text(_normalize_effective(after)):
+                raise NetplanSafetyError("Effective netplan configuration changed after migration.")
+            prov = {
+                "version": 1,
+                "source_name": source.name,
+                "source_sha256": _sha256_bytes(plan.source_bytes),
+                "dest_name": DEST_NAME,
+                "dest_sha256": _sha256_bytes(plan.source_bytes),
+                "retired_name": retired.name,
+                "migrated_at": int(time.time()),
+            }
+            _write_provenance_new(prov)
+        except NetplanSafetyError:
+            _rollback_migration(dest, source, retired)
+            raise
 
     return {
         "status": "migrated",

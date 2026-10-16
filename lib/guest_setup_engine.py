@@ -23,6 +23,7 @@ from guest_netplan import (  # noqa: E402
     independent_netplan_verified,
     migrate_netplan_independence,
     network_diagnostics_readonly,
+    provenance_fingerprint,
 )
 from guest_network import (  # noqa: E402
     NetworkCompareError,
@@ -34,7 +35,7 @@ from guest_network import (  # noqa: E402
     resolv_conf_usable,
 )
 
-VERSION = "0.3.0"
+VERSION = "0.3.1"
 
 SUPPORTED_OS = frozenset(
     {("debian", "12"), ("debian", "13"), ("ubuntu", "22.04"), ("ubuntu", "24.04")}
@@ -163,6 +164,10 @@ def _mock_run(cmd: list[str]) -> Any:
             '[{"dst":"default","gateway":"10.0.0.1","dev":"eth0"}]',
         )
         return subprocess.CompletedProcess(cmd, 0, raw, "")
+    if cmd[:2] == ["sshd", "-t"] or cmd[:2] == ["/usr/sbin/sshd", "-t"]:
+        if os.environ.get("PVEOSI_GUEST_MOCK_SSHD_T_FAIL") == "1":
+            return subprocess.CompletedProcess(cmd, 1, "", "mock invalid")
+        return subprocess.CompletedProcess(cmd, 0, "", "")
     return subprocess.CompletedProcess(cmd, 0, "", "")
 
 
@@ -224,16 +229,24 @@ def run_preflight() -> PreflightResult:
 
 
 def cloud_init_first_boot_complete() -> bool:
-    sem = _path("var/lib/cloud/instance/sem/config_scripts_user")
-    if sem.exists():
-        return True
     if _which("cloud-init"):
         r = _run(["cloud-init", "status"])
         out = (r.stdout or "") + (r.stderr or "")
-        if "status: done" in out.lower() or out.strip().lower() == "done":
-            return True
-        if "not run" in out.lower() or "error" in out.lower():
+        low = out.lower()
+        if "error" in low or "status: error" in low:
             return False
+        if "status: done" in low or out.strip().lower() == "done":
+            return True
+        if "not run" in low:
+            return False
+    sem = _path("var/lib/cloud/instance/sem/config_scripts_user")
+    if sem.exists():
+        if _which("cloud-init"):
+            r = _run(["cloud-init", "status"])
+            out = (r.stdout or "") + (r.stderr or "")
+            if "error" in out.lower():
+                return False
+        return True
     return os.environ.get("PVEOSI_GUEST_MOCK_CI_STATUS", "").lower() == "done"
 
 
@@ -299,6 +312,27 @@ def _network_snapshot() -> dict[str, Any]:
     return snap
 
 
+def _snapshot_canonical(snap: dict[str, Any]) -> str:
+    return json.dumps(snap, sort_keys=True)
+
+
+def _baseline_unchanged(prev: dict[str, Any], pf: PreflightResult) -> bool:
+    stored = prev.get("network_snapshot") or {}
+    current = _network_snapshot()
+    if _snapshot_canonical(stored) != _snapshot_canonical(current):
+        return False
+    if pf.network_backend == "netplan":
+        if prev.get("provenance_fingerprint") != provenance_fingerprint():
+            return False
+    return True
+
+
+def _network_independence_established(backend: str, net_result: dict[str, str]) -> bool:
+    if backend != "netplan":
+        return False
+    return net_result.get("status") in ("migrated", "already_migrated")
+
+
 def disable_cloud_init_marker(dry_run: bool) -> None:
     marker = _path("etc/cloud/cloud-init.disabled")
     if marker.exists():
@@ -319,6 +353,19 @@ def _ssh_service_active() -> bool:
     return False
 
 
+def _ssh_config_valid() -> bool:
+    if os.environ.get("PVEOSI_GUEST_MOCK_CMD") == "1":
+        return os.environ.get("PVEOSI_GUEST_MOCK_SSHD_T_FAIL") != "1"
+    for cmd in (["sshd", "-t"], ["/usr/sbin/sshd", "-t"]):
+        if cmd[0].startswith("/") or shutil.which(cmd[0]):
+            r = _run(cmd)
+            if r.returncode == 0:
+                return True
+            if r.returncode != 0 and shutil.which(cmd[0]):
+                return False
+    return True
+
+
 def cmd_prepare(dry_run: bool = False) -> int:
     pf = run_preflight()
     if not cloud_init_first_boot_complete():
@@ -326,7 +373,14 @@ def cmd_prepare(dry_run: bool = False) -> int:
             "Cloud-init first boot does not appear complete; wait for cloud-init status done."
         )
     prev = _read_state()
-    was_verified = prev.get("phase") == "verified" and prev.get("verified")
+    current_boot = boot_id()
+    if not _valid_boot_id(current_boot):
+        raise GuestSetupError("Cannot read a valid kernel boot ID.")
+    if prev.get("phase") == "prepared" and not prev.get("machine_verified"):
+        if current_boot != prev.get("prepare_boot_id"):
+            raise GuestSetupError(
+                "Guest rebooted after PREPARE; run verify instead of prepare."
+            )
     if dry_run:
         os.environ["PVEOSI_GUEST_DRY_RUN"] = "1"
     net_result: dict[str, str] = {}
@@ -339,35 +393,59 @@ def cmd_prepare(dry_run: bool = False) -> int:
     else:
         print(network_diagnostics_readonly(pf.network_backend))
         print(
-            "Non-netplan backend: no automatic migration; manual network verification required."
+            "Non-netplan backend: manual-only workflow; cloud-init.disabled is not created "
+            "until network independence is machine-verified (not available on this backend)."
         )
         net_result = {"status": "preserved_readonly", "backend": pf.network_backend}
 
-    disable_cloud_init_marker(dry_run)
+    if _network_independence_established(pf.network_backend, net_result):
+        disable_cloud_init_marker(dry_run)
+
+    had_checkpoint = bool(prev.get("phase")) and prev.get("network_snapshot")
+    if had_checkpoint:
+        if prev.get("phase") == "prepared" and current_boot == prev.get("prepare_boot_id"):
+            if not _baseline_unchanged(prev, pf):
+                raise GuestSetupError(
+                    "Network baseline changed; cannot silently refresh PREPARE checkpoint."
+                )
+            checkpoint = dict(prev)
+            checkpoint["version"] = VERSION
+            checkpoint["netplan"] = net_result
+            if not dry_run:
+                _write_state(checkpoint)
+            print("\nPREPARE idempotent (baseline unchanged). Reboot before verify if not done yet.")
+            return 0
+        if prev.get("machine_verified") or prev.get("phase") in ("verified", "manual_acknowledged"):
+            if not _baseline_unchanged(prev, pf):
+                raise GuestSetupError(
+                    "Material change since verified checkpoint; start a new preparation cycle."
+                )
+            checkpoint = dict(prev)
+            checkpoint["version"] = VERSION
+            checkpoint["netplan"] = net_result
+            if not dry_run:
+                _write_state(checkpoint)
+            print("\nPREPARE idempotent; verified readiness unchanged.")
+            return 0
+
     snap = _network_snapshot()
-    current_boot = boot_id()
-    if not _valid_boot_id(current_boot):
-        raise GuestSetupError("Cannot read a valid kernel boot ID.")
-    preserve_boot = (
-        prev.get("phase") in ("prepared", "verified")
-        and prev.get("prepare_boot_id")
-        and not was_verified
-    )
     checkpoint = {
-        "phase": "verified" if was_verified else "prepared",
+        "phase": "prepared",
         "version": VERSION,
         "os": f"{pf.os_info.id}:{pf.os_info.version_id}",
         "network_backend": pf.network_backend,
-        "prepare_boot_id": prev.get("prepare_boot_id") if preserve_boot else current_boot,
-        "prepare_epoch": prev.get("prepare_epoch", int(time.time())),
+        "prepare_boot_id": current_boot,
+        "prepare_epoch": int(time.time()),
         "netplan": net_result,
         "network_snapshot": snap,
-        "verified": bool(was_verified),
-        "external_ssh_attested": bool(prev.get("external_ssh_attested")) if was_verified else False,
+        "provenance_fingerprint": provenance_fingerprint()
+        if pf.network_backend == "netplan"
+        else None,
+        "verified": False,
+        "machine_verified": False,
+        "external_ssh_attested": False,
+        "manual_only": pf.network_backend in ("ifupdown", "systemd-networkd"),
     }
-    if was_verified:
-        checkpoint["verify_boot_id"] = prev.get("verify_boot_id")
-        checkpoint["verify_epoch"] = prev.get("verify_epoch")
     if not dry_run:
         _write_state(checkpoint)
     print("\nPREPARE complete. Reboot the guest manually before running: pveosi-guest-setup verify")
@@ -375,14 +453,21 @@ def cmd_prepare(dry_run: bool = False) -> int:
     return 0
 
 
-def cmd_verify(interactive: bool = True) -> int:
+def cmd_verify(interactive: bool = True, manual_only: bool = False) -> int:
     if not interactive:
         raise GuestSetupError("External SSH attestation requires interactive verify.")
     st = _read_state()
     if st.get("phase") not in ("prepared", "verified"):
         raise GuestSetupError("No successful PREPARE checkpoint found; run prepare first.")
-    if st.get("verified") and st.get("phase") == "verified":
+    if st.get("machine_verified") and st.get("phase") == "verified":
+        if not _baseline_unchanged(st, run_preflight()):
+            raise GuestSetupError(
+                "Verified checkpoint no longer matches current network; re-prepare required."
+            )
         print("VERIFY already recorded for this checkpoint.")
+        return 0
+    if st.get("phase") == "manual_acknowledged" and st.get("manual_only"):
+        print("Manual-only acknowledgment already recorded.")
         return 0
     current_boot = boot_id()
     if not _valid_boot_id(current_boot):
@@ -421,12 +506,18 @@ def cmd_verify(interactive: bool = True) -> int:
                 f"Independent netplan migration not proven (missing {DEST_NAME} provenance)."
             )
     elif pf.network_backend in ("ifupdown", "systemd-networkd"):
+        if not manual_only:
+            raise GuestSetupError(
+                "Non-netplan backend: machine-verified readiness unavailable. "
+                "Use: pveosi-guest-setup verify --manual-only"
+            )
         print(
-            "WARNING: Non-netplan backend — network independence is not machine-verified; "
-            "complete manual checks before cloud-init package removal."
+            "WARNING: Manual-only workflow — this does NOT authorize cloud-init package removal."
         )
     if not _ssh_service_active():
         raise GuestSetupError("SSH service is not active.")
+    if not _ssh_config_valid():
+        raise GuestSetupError("SSH daemon configuration check failed (sshd -t).")
     print("Local checks passed. External SSH login must be confirmed by the operator.")
     print("(External connectivity is not machine-verified from inside the guest.)")
     ans = input(
@@ -434,13 +525,26 @@ def cmd_verify(interactive: bool = True) -> int:
     ).strip().lower()
     if ans not in ("yes", "y"):
         raise GuestSetupError("External SSH attestation missing; verify blocked.")
-    st["verified"] = True
+    machine_ok = (
+        pf.network_backend == "netplan"
+        and independent_netplan_verified()
+        and not manual_only
+    )
+    st["verified"] = machine_ok or manual_only
+    st["machine_verified"] = machine_ok
+    st["manual_only"] = manual_only or pf.network_backend in ("ifupdown", "systemd-networkd")
     st["verify_boot_id"] = current_boot
     st["external_ssh_attested"] = True
-    st["phase"] = "verified"
+    st["phase"] = "manual_acknowledged" if manual_only else "verified"
     st["verify_epoch"] = int(time.time())
     _write_state(st)
-    print("VERIFY complete. Host-side pveosi finalize may proceed after guest shutdown.")
+    if machine_ok:
+        print("VERIFY complete. Host-side pveosi finalize may proceed after guest shutdown.")
+    else:
+        print(
+            "Manual-only acknowledgment recorded. Do not treat this as machine-verified "
+            "readiness for cloud-init package removal."
+        )
     return 0
 
 
@@ -457,6 +561,9 @@ def cmd_status() -> int:
     print(f"  CI disabled file: {_path('etc/cloud/cloud-init.disabled').exists()}")
     print(f"  Checkpoint phase: {st.get('phase', 'none')}")
     print(f"  Verified:         {st.get('verified', False)}")
+    print(f"  Machine-verified: {st.get('machine_verified', False)}")
+    if st.get("manual_only"):
+        print("  Manual-only:      yes (not authorized for CI package removal)")
     if st.get("prepare_boot_id"):
         print(f"  Prepare boot_id:  {st.get('prepare_boot_id')}")
         print(f"  Current boot_id:  {boot_id()}")
@@ -535,6 +642,11 @@ def cmd_main(argv: list[str]) -> int:
     parser.add_argument("--status", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--guided", action="store_true")
+    parser.add_argument(
+        "--manual-only",
+        action="store_true",
+        help="Non-netplan manual acknowledgment (not machine-verified readiness)",
+    )
     parser.add_argument("command", nargs="?", choices=["prepare", "verify"])
     args = parser.parse_args(argv)
 
@@ -560,7 +672,7 @@ def cmd_main(argv: list[str]) -> int:
                     raise GuestSetupError("Reboot required before verify.")
                 print("Checkpoint and boot ID look ready for interactive verify.")
                 return 0
-            return cmd_verify(interactive=True)
+            return cmd_verify(interactive=True, manual_only=args.manual_only)
         if args.dry_run and not args.command:
             print_preflight_report(pf)
             return cmd_prepare(dry_run=True)

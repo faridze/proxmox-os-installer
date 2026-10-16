@@ -150,6 +150,13 @@ class GuestNetplanTests(unittest.TestCase):
         self.assertTrue((self.root / "etc/netplan/50-cloud-init.yaml").exists())
         self.assertFalse((self.root / "etc/netplan/90-pveosi-static.yaml").exists())
 
+    def test_interrupted_tmp_refused(self):
+        (self.root / "etc/netplan/50-cloud-init.yaml").write_text(STATIC_DEBIAN, encoding="utf-8")
+        stale = self.root / "etc/netplan/90-pveosi-static.yaml.pveosi-migrate.tmp"
+        stale.write_text("partial", encoding="utf-8")
+        with self.assertRaises(guest_netplan.NetplanSafetyError):
+            guest_netplan.migration_state()
+
     def test_no_netplan_apply_in_mock_log(self):
         log = self.root / "cmds.json"
         os.environ["PVEOSI_GUEST_MOCK_SCRIPT"] = str(log)

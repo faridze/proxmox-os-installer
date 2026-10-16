@@ -87,7 +87,8 @@ class PrepareVerifyTests(unittest.TestCase):
         with mock.patch("builtins.input", return_value="yes"):
             guest.cmd_verify(interactive=True)
         st = json.loads((self.root / "var/lib/pveosi-guest-setup/state.json").read_text())
-        self.assertTrue(st["verified"])
+        self.assertTrue(st["machine_verified"])
+        self.assertEqual(st["phase"], "verified")
 
     def test_verify_blocks_without_ssh_attest(self):
         guest.cmd_prepare(dry_run=False)

@@ -9,6 +9,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional
 
+try:
+    import yaml
+except ImportError:  # pragma: no cover
+    yaml = None  # type: ignore
+
 
 class NetworkCompareError(Exception):
     """Network verification failure."""
@@ -18,7 +23,7 @@ class NetworkCompareError(Exception):
 class IfaceFacts:
     name: str
     addresses: list[str]  # CIDR strings
-    dhcp: bool
+    addressing: str  # dhcp | static | unknown
 
 
 @dataclass
@@ -62,9 +67,58 @@ def _run_ip_json(args: list[str]) -> Any:
     return json.loads(r.stdout or "null")
 
 
+def _netplan_addressing_hints() -> dict[str, str]:
+    """Map interface name -> dhcp | static | unknown from active netplan YAML."""
+    hints: dict[str, str] = {}
+    np_dir = _root() / "etc/netplan"
+    if not np_dir.is_dir() or yaml is None:
+        return hints
+    files = sorted(np_dir.glob("*.yaml"))
+    for path in files:
+        if not path.is_file() or path.is_symlink():
+            continue
+        try:
+            doc = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        except yaml.YAMLError:
+            continue
+        net = doc.get("network") if isinstance(doc, dict) else None
+        if not isinstance(net, dict):
+            continue
+        eth = net.get("ethernets")
+        if not isinstance(eth, dict):
+            continue
+        for name, cfg in eth.items():
+            if not isinstance(cfg, dict):
+                hints[str(name)] = "unknown"
+                continue
+            dhcp4 = cfg.get("dhcp4")
+            dhcp6 = cfg.get("dhcp6")
+            if dhcp4 is True or dhcp6 is True:
+                hints[str(name)] = "dhcp"
+            elif cfg.get("addresses"):
+                hints[str(name)] = "static"
+            else:
+                hints[str(name)] = "unknown"
+    return hints
+
+
+def _resolve_addressing(
+    name: str, hints: dict[str, str], runtime_dynamic: bool
+) -> str:
+    hinted = hints.get(name, "unknown")
+    if hinted == "dhcp":
+        return "dhcp"
+    if hinted == "static":
+        return "static"
+    if runtime_dynamic:
+        return "dhcp"
+    return "unknown"
+
+
 def capture_network_facts() -> NetworkFacts:
     addr_data = _run_ip_json(["addr", "show"])
     route_data = _run_ip_json(["route", "show", "default"])
+    hints = _netplan_addressing_hints()
     ifaces: list[IfaceFacts] = []
     if isinstance(addr_data, list):
         for item in addr_data:
@@ -74,7 +128,7 @@ def capture_network_facts() -> NetworkFacts:
             if not name or name == "lo":
                 continue
             addrs: list[str] = []
-            dhcp = False
+            runtime_dynamic = False
             for ai in item.get("addr_info", []) or []:
                 if not isinstance(ai, dict):
                     continue
@@ -84,17 +138,12 @@ def capture_network_facts() -> NetworkFacts:
                 prefix = ai.get("prefixlen")
                 if local is not None and prefix is not None:
                     addrs.append(f"{local}/{prefix}")
-            flags = item.get("flags") or []
-            if isinstance(flags, list) and "UP" in flags:
-                pass
-            # DHCP hint from dynamic flag on address or operstate - conservative
-            oper = str(item.get("operstate", "")).lower()
-            if oper == "unknown":
-                oper = ""
-            for ai in item.get("addr_info", []) or []:
                 if ai.get("dynamic"):
-                    dhcp = True
-            ifaces.append(IfaceFacts(name=name, addresses=sorted(addrs), dhcp=dhcp))
+                    runtime_dynamic = True
+            addressing = _resolve_addressing(name, hints, runtime_dynamic)
+            ifaces.append(
+                IfaceFacts(name=name, addresses=sorted(addrs), addressing=addressing)
+            )
     gw: Optional[str] = None
     dev: Optional[str] = None
     metric: Optional[int] = None
@@ -118,7 +167,8 @@ def capture_network_facts() -> NetworkFacts:
 def facts_to_checkpoint(facts: NetworkFacts) -> dict[str, Any]:
     return {
         "interfaces": [
-            {"name": i.name, "addresses": i.addresses, "dhcp": i.dhcp} for i in facts.interfaces
+            {"name": i.name, "addresses": i.addresses, "addressing": i.addressing}
+            for i in facts.interfaces
         ],
         "default_gw": facts.default_gw,
         "default_dev": facts.default_dev,
@@ -129,11 +179,16 @@ def facts_to_checkpoint(facts: NetworkFacts) -> dict[str, Any]:
 def facts_from_checkpoint(data: dict[str, Any]) -> NetworkFacts:
     ifaces = []
     for item in data.get("interfaces", []):
+        addr_mode = item.get("addressing")
+        if addr_mode is None and "dhcp" in item:
+            addr_mode = "dhcp" if item.get("dhcp") else "static"
+        if addr_mode not in ("dhcp", "static", "unknown"):
+            addr_mode = "unknown"
         ifaces.append(
             IfaceFacts(
                 name=str(item.get("name", "")),
                 addresses=list(item.get("addresses", [])),
-                dhcp=bool(item.get("dhcp")),
+                addressing=str(addr_mode),
             )
         )
     return NetworkFacts(
@@ -154,22 +209,38 @@ def compare_network_facts(before: NetworkFacts, after: NetworkFacts) -> NetworkC
         return NetworkCompareResult(False, False, msgs)
     for name, b in before_map.items():
         a = after_map[name]
-        if b.dhcp or a.dhcp:
+        mode_b = b.addressing
+        mode_a = a.addressing
+        if mode_b == "static" and mode_a == "static":
+            if b.addresses != a.addresses:
+                msgs.append(f"Static IPv4 changed on {name}.")
+                return NetworkCompareResult(False, False, msgs)
+        elif mode_b == "dhcp" and mode_a == "dhcp":
             if b.addresses != a.addresses:
                 msgs.append(f"DHCP address changed on {name}; operator confirmation required.")
                 need_confirm = True
         else:
             if b.addresses != a.addresses:
-                msgs.append(f"Static IPv4 changed on {name}.")
-                return NetworkCompareResult(False, False, msgs)
+                msgs.append(
+                    f"Address changed on {name} (addressing mode {mode_b}->{mode_a}); "
+                    "operator confirmation required."
+                )
+                need_confirm = True
     if before.default_gw != after.default_gw or before.default_dev != after.default_dev:
-        msgs.append("Default route or gateway changed.")
-        return NetworkCompareResult(False, False, msgs)
-    if before.default_metric != after.default_metric and not (before_map and all(
-        before_map[n].dhcp for n in before_map
-    )):
-        msgs.append("Default route metric changed.")
-        return NetworkCompareResult(False, False, msgs)
+        if all(i.addressing == "dhcp" for i in before.interfaces) and all(
+            i.addressing == "dhcp" for i in after.interfaces
+        ):
+            msgs.append("Default route changed on DHCP guest; operator confirmation required.")
+            need_confirm = True
+        else:
+            msgs.append("Default route or gateway changed.")
+            return NetworkCompareResult(False, False, msgs)
+    if before.default_metric != after.default_metric:
+        if all(i.addressing == "dhcp" for i in before.interfaces):
+            need_confirm = True
+        else:
+            msgs.append("Default route metric changed.")
+            return NetworkCompareResult(False, False, msgs)
     return NetworkCompareResult(True, need_confirm, msgs)
 
 
