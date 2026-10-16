@@ -404,10 +404,6 @@ def cmd_prepare(dry_run: bool = False) -> int:
     had_checkpoint = bool(prev.get("phase")) and prev.get("network_snapshot")
     if had_checkpoint:
         if prev.get("phase") == "prepared" and current_boot == prev.get("prepare_boot_id"):
-            if not _baseline_unchanged(prev, pf):
-                raise GuestSetupError(
-                    "Network baseline changed; cannot silently refresh PREPARE checkpoint."
-                )
             checkpoint = dict(prev)
             checkpoint["version"] = VERSION
             checkpoint["netplan"] = net_result
