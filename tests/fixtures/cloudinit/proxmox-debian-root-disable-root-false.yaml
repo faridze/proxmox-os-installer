@@ -1,0 +1,10 @@
+#cloud-config
+hostname: pveosi-test
+manage_etc_hosts: true
+user: root
+password: $6$rounds=656000$testhashvalue
+chpasswd:
+  expire: false
+disable_root: false
+ssh_pwauth: false
+package_upgrade: true
