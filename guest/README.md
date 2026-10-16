@@ -1,23 +1,39 @@
 # pveosi-guest-setup (standalone guest bundle)
 
-Copy this directory's sibling files into a VM **without** installing the full Proxmox host tool:
+Version-pinned install **inside the guest** (no Proxmox host paths required):
 
 ```bash
-# On your workstation (from a clone of this repository):
-scp bin/pveosi-guest-setup lib/guest_setup_engine.py user@VM:/tmp/pveosi-guest/
-ssh user@VM 'sudo install -m 0755 /tmp/pveosi-guest/pveosi-guest-setup /usr/local/sbin/pveosi-guest-setup'
-ssh user@VM 'sudo install -m 0644 /tmp/pveosi-guest/guest_setup_engine.py /usr/local/lib/pveosi-guest-setup.py'
+# From a reviewed repository checkout (set REF to tag or commit):
+REF=c042933c7bcd0a11206754cdffb452a70ea6f830
+curl -fsSLo /tmp/pveosi-guest.tgz \
+  "https://github.com/faridze/proxmox-os-installer/archive/${REF}.tar.gz"
+tar -xzf /tmp/pveosi-guest.tgz -C /tmp
+cd "/tmp/proxmox-os-installer-${REF}"
+sudo bash guest/install.sh
 ```
 
-Edit `/usr/local/sbin/pveosi-guest-setup` to point `ENGINE` at `/usr/local/lib/pveosi-guest-setup.py`, or keep the two-file layout from `bin/` + `lib/`.
+Or copy two files into one directory on the guest (flat bundle):
 
-Run inside the guest as root:
+```bash
+install -d -m 0755 /opt/pveosi-guest
+install -m 0755 bin/pveosi-guest-setup /opt/pveosi-guest/
+install -m 0644 lib/guest_setup_engine.py lib/guest_netplan.py /opt/pveosi-guest/
+ln -sf /opt/pveosi-guest/pveosi-guest-setup /usr/local/sbin/pveosi-guest-setup
+export PYTHONPATH=/opt/pveosi-guest
+```
+
+The wrapper resolves `guest_setup_engine.py` next to itself or under `/usr/local/lib/pveosi-guest/`.
+
+## Workflow
 
 ```bash
 sudo pveosi-guest-setup --preflight
-sudo pveosi-guest-setup --guided
+sudo pveosi-guest-setup prepare          # netplan independence + cloud-init.disabled
+sudo reboot
+sudo pveosi-guest-setup verify           # after reboot; attests external SSH
+sudo pveosi-guest-setup --status
 ```
 
-Supported: Debian 12/13, Ubuntu Server 22.04/24.04 LTS (systemd, netplan/ifupdown/systemd-networkd). NetworkManager-active guests are refused for automated network changes.
+`prepare --dry-run` / top-level `--dry-run` performs no mutations.
 
-This utility does **not** SSH from the Proxmox host; operators copy and run it manually after first boot.
+Supported: Debian 12/13, Ubuntu 22.04/24.04 with netplan (safe copy to `90-pveosi-static.yaml`). ifupdown/systemd-networkd: read-only diagnostics only.

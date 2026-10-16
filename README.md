@@ -100,11 +100,13 @@ Runs **inside** Debian 12/13 or Ubuntu 22.04/24.04 guests (not on Proxmox). Copy
 
 ```bash
 sudo pveosi-guest-setup --preflight
-sudo pveosi-guest-setup          # menu
-sudo pveosi-guest-setup --guided
+sudo pveosi-guest-setup prepare    # safe netplan copy + cloud-init.disabled
+sudo reboot
+sudo pveosi-guest-setup verify     # after reboot; external SSH attestation
+sudo pveosi-guest-setup --status
 ```
 
-Steps include hostname, network (netplan/ifupdown/systemd-networkd), disabling cloud-init, QEMU guest agent, optional apt upgrades, time sync, and read-only SSH/disk diagnostics. NetworkManager-active guests are refused for automated network changes.
+Netplan: copies cloud-init YAML verbatim to `90-pveosi-static.yaml` (no template rewrites; no `netplan apply`). ifupdown/systemd-networkd: read-only diagnostics. Install inside the guest: `guest/install.sh` or `guest/README.md`.
 
 ## Supported OS versions
 

@@ -47,6 +47,7 @@ REQUIRED_SOURCE = (
     "lib/console_engine.py",
     "lib/snippet_cleanup.py",
     "lib/guest_setup_engine.py",
+    "lib/guest_netplan.py",
     "bin/pveosi-guest-setup",
     "lib/common.sh",
     "lib/interactive.sh",
@@ -67,6 +68,7 @@ REQUIRED_INSTALLED = (
     "lib/console_engine.py",
     "lib/snippet_cleanup.py",
     "lib/guest_setup_engine.py",
+    "lib/guest_netplan.py",
     "bin/pveosi-guest-setup",
     "lib/common.sh",
     "lib/interactive.sh",
@@ -84,6 +86,7 @@ PY_LIBS = (
     "console_engine.py",
     "snippet_cleanup.py",
     "guest_setup_engine.py",
+    "guest_netplan.py",
 )
 SH_LIBS = ("common.sh", "interactive.sh", "install_aliases.sh", "snippets_guidance.sh")
 

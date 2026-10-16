@@ -27,6 +27,9 @@ def _make_package(root: Path, version: str = "9.9.9-test") -> None:
     (root / "bin").mkdir(exist_ok=True)
     shutil_copy(BASE / "bin/proxmox-os-installer", root / "bin/proxmox-os-installer")
     shutil_copy(BASE / "bin/pveosi-guest-setup", root / "bin/pveosi-guest-setup")
+    (root / "lib/pveosi-guest").mkdir(exist_ok=True)
+    shutil_copy(BASE / "lib/guest_setup_engine.py", root / "lib/pveosi-guest/guest_setup_engine.py")
+    shutil_copy(BASE / "lib/guest_netplan.py", root / "lib/pveosi-guest/guest_netplan.py")
     (root / "lib").mkdir(exist_ok=True)
     for name in (
         "image_catalog.py",
@@ -38,6 +41,7 @@ def _make_package(root: Path, version: str = "9.9.9-test") -> None:
         "console_engine.py",
         "snippet_cleanup.py",
         "guest_setup_engine.py",
+        "guest_netplan.py",
         "common.sh",
         "interactive.sh",
         "install_aliases.sh",

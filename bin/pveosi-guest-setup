@@ -2,13 +2,21 @@
 # pveosi-guest-setup — runs inside Debian/Ubuntu guests (not on the Proxmox host).
 set -Eeuo pipefail
 SELF="$(readlink -f -- "${BASH_SOURCE[0]}")"
-ROOT="$(cd -- "$(dirname -- "$SELF")/.." && pwd -P)"
-ENGINE="/usr/local/lib/proxmox-os-installer/lib/guest_setup_engine.py"
-if [[ ! -f "$ENGINE" ]]; then
-  ENGINE="${ROOT}/lib/guest_setup_engine.py"
-fi
-[[ -f "$ENGINE" ]] || {
-  printf 'ERROR: guest_setup_engine.py not found\n' >&2
+SELF_DIR="$(dirname -- "$SELF")"
+ENGINE=""
+for candidate in \
+  "${SELF_DIR}/guest_setup_engine.py" \
+  "${SELF_DIR}/lib/guest_setup_engine.py" \
+  "/usr/local/lib/pveosi-guest/guest_setup_engine.py"; do
+  if [[ -f "$candidate" ]]; then
+    ENGINE="$candidate"
+    break
+  fi
+done
+[[ -n "$ENGINE" ]] || {
+  printf 'ERROR: guest_setup_engine.py not found beside %s\n' "$SELF" >&2
   exit 1
 }
+LIB_DIR="$(dirname -- "$ENGINE")"
+export PYTHONPATH="${LIB_DIR}${PYTHONPATH:+:$PYTHONPATH}"
 exec python3 "$ENGINE" "$@"
