@@ -46,6 +46,8 @@ REQUIRED_SOURCE = (
     "lib/finalize_engine.py",
     "lib/console_engine.py",
     "lib/snippet_cleanup.py",
+    "lib/guest_setup_engine.py",
+    "bin/pveosi-guest-setup",
     "lib/common.sh",
     "lib/interactive.sh",
     "lib/install_aliases.sh",
@@ -64,6 +66,8 @@ REQUIRED_INSTALLED = (
     "lib/finalize_engine.py",
     "lib/console_engine.py",
     "lib/snippet_cleanup.py",
+    "lib/guest_setup_engine.py",
+    "bin/pveosi-guest-setup",
     "lib/common.sh",
     "lib/interactive.sh",
     "lib/install_aliases.sh",
@@ -79,6 +83,7 @@ PY_LIBS = (
     "finalize_engine.py",
     "console_engine.py",
     "snippet_cleanup.py",
+    "guest_setup_engine.py",
 )
 SH_LIBS = ("common.sh", "interactive.sh", "install_aliases.sh", "snippets_guidance.sh")
 

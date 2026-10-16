@@ -35,8 +35,6 @@ def _run(cmd: list[str]) -> subprocess.CompletedProcess[str]:
 def resolve_snippet_path(volid: str) -> str:
     mock_json = os.environ.get("PVEOSI_MOCK_SNIPPET_PATHS")
     if mock_json:
-        import json
-
         store = json.loads(mock_json)
         if volid in store:
             return str(store[volid])

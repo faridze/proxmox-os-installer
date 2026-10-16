@@ -94,6 +94,18 @@ pveosi finalize <VMID>
 
 Guest preparation (disable cloud-init in the guest, reboot, verify access, shut down) is **operator-attested** — the host does not verify guest-agent state. Finalization removes Cloud-Init drives/settings from the Proxmox VM config only; it does not change passwords or SSH inside the guest. Snippet deletion is optional and only for matching `pveosi-VMID-user.yaml` files with no other references.
 
+### Guest-side setup (`pveosi-guest-setup`)
+
+Runs **inside** Debian 12/13 or Ubuntu 22.04/24.04 guests (not on Proxmox). Copy `bin/pveosi-guest-setup` and `lib/guest_setup_engine.py` into the VM, or install from the host tree (`guest/README.md`). No automatic host-to-guest SSH deployment.
+
+```bash
+sudo pveosi-guest-setup --preflight
+sudo pveosi-guest-setup          # menu
+sudo pveosi-guest-setup --guided
+```
+
+Steps include hostname, network (netplan/ifupdown/systemd-networkd), disabling cloud-init, QEMU guest agent, optional apt upgrades, time sync, and read-only SSH/disk diagnostics. NetworkManager-active guests are refused for automated network changes.
+
 ## Supported OS versions
 
 | OS | Versions | Default user |
