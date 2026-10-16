@@ -7,6 +7,10 @@ Version-pinned install **inside the guest** (no Proxmox host paths required):
 REF=c042933c7bcd0a11206754cdffb452a70ea6f830
 curl -fsSLo /tmp/pveosi-guest.tgz \
   "https://github.com/faridze/proxmox-os-installer/archive/${REF}.tar.gz"
+sha256sum -c <<EOF
+# replace with published checksum for REF
+# abcdef...  /tmp/pveosi-guest.tgz
+EOF
 tar -xzf /tmp/pveosi-guest.tgz -C /tmp
 cd "/tmp/proxmox-os-installer-${REF}"
 sudo bash guest/install.sh
@@ -17,7 +21,7 @@ Or copy two files into one directory on the guest (flat bundle):
 ```bash
 install -d -m 0755 /opt/pveosi-guest
 install -m 0755 bin/pveosi-guest-setup /opt/pveosi-guest/
-install -m 0644 lib/guest_setup_engine.py lib/guest_netplan.py /opt/pveosi-guest/
+install -m 0644 lib/guest_setup_engine.py lib/guest_netplan.py lib/guest_network.py /opt/pveosi-guest/
 ln -sf /opt/pveosi-guest/pveosi-guest-setup /usr/local/sbin/pveosi-guest-setup
 export PYTHONPATH=/opt/pveosi-guest
 ```

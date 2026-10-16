@@ -3,21 +3,25 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import re
 import shutil
 import subprocess
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional
 
 try:
     import yaml
-except ImportError:  # pragma: no cover - tested via mock env
+except ImportError:  # pragma: no cover
     yaml = None  # type: ignore
 
 DEST_NAME = "90-pveosi-static.yaml"
+PROVENANCE_NAME = "pveosi-netplan-migration.json"
 CLOUD_INIT_NAME_RE = re.compile(r"cloud[-_]?init", re.I)
+PVEOSI_TMP_SUFFIX = ".pveosi-migrate.tmp"
 
 
 class NetplanSafetyError(Exception):
@@ -36,8 +40,8 @@ class NetplanInspect:
 
 @dataclass(frozen=True)
 class NetplanPlan:
-    inspect: NetplanInspect
-    action: str  # skip | create_copy | already_independent
+    inspect: Optional[NetplanInspect]
+    action: str  # create_copy | already_migrated
     source_bytes: bytes
 
 
@@ -51,6 +55,18 @@ def netplan_dir() -> Path:
 
 def backup_dir() -> Path:
     return _root() / "var/lib/pveosi-guest-setup/backups"
+
+
+def provenance_path() -> Path:
+    return backup_dir() / PROVENANCE_NAME
+
+
+def _sha256_bytes(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+
+def _sha256_file(path: Path) -> str:
+    return _sha256_bytes(path.read_bytes())
 
 
 def _safe_path_in_netplan(path: Path) -> None:
@@ -95,11 +111,7 @@ def _inspect_structure(net: dict[str, Any], label: str) -> tuple[int, Optional[s
                 f"{label} uses {risky}; automatic preservation is not supported."
             )
     renderer = net.get("renderer")
-    if renderer is not None and not isinstance(renderer, str):
-        raise NetplanSafetyError("Invalid renderer value in netplan YAML.")
-    eth = net.get("ethernets", {})
-    if eth is None:
-        eth = {}
+    eth = net.get("ethernets", {}) or {}
     if not isinstance(eth, dict):
         raise NetplanSafetyError("Invalid ethernets block in netplan YAML.")
     count = len(eth)
@@ -141,25 +153,19 @@ def _identify_cloud_init_source(files: list[Path]) -> Path:
         raise NetplanSafetyError(
             "Multiple cloud-init netplan candidates; resolve manually before using this tool."
         )
-    other_eth_files = []
     for p in files:
         if p == matches[0] or p.name == DEST_NAME:
             continue
         doc = _load_yaml(p.read_text(encoding="utf-8"), p.name)
-        net = _network_block(doc)
-        if net.get("ethernets"):
-            other_eth_files.append(p.name)
-    if other_eth_files:
-        raise NetplanSafetyError(
-            f"Conflicting netplan files with ethernet definitions: {', '.join(other_eth_files)}"
-        )
+        if _network_block(doc).get("ethernets"):
+            raise NetplanSafetyError(
+                f"Conflicting netplan files with ethernet definitions: {p.name}"
+            )
     return matches[0]
 
 
 def inspect_netplan() -> NetplanInspect:
     files = list_netplan_files()
-    if not files:
-        raise NetplanSafetyError("No netplan YAML files present.")
     dest = netplan_dir() / DEST_NAME
     _safe_path_in_netplan(dest)
     source = _identify_cloud_init_source(files)
@@ -174,6 +180,124 @@ def inspect_netplan() -> NetplanInspect:
         renderer=renderer,
         ethernet_count=eth_count,
     )
+
+
+def read_provenance() -> Optional[dict[str, Any]]:
+    path = provenance_path()
+    if not path.is_file():
+        return None
+    if path.is_symlink():
+        raise NetplanSafetyError("Provenance file is a symlink; refusing.")
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise NetplanSafetyError("Corrupt netplan migration provenance.") from exc
+    if not isinstance(data, dict) or data.get("version") != 1:
+        raise NetplanSafetyError("Invalid netplan migration provenance.")
+    return data
+
+
+def _write_provenance(data: dict[str, Any]) -> None:
+    payload = (json.dumps(data, indent=2) + "\n").encode("utf-8")
+    _atomic_write_private(provenance_path(), payload)
+
+
+def _atomic_write_private(path: Path, data: bytes) -> None:
+    if path.exists():
+        _safe_path_in_netplan(path)
+    parent = path.parent
+    parent.mkdir(parents=True, exist_ok=True)
+    if parent.stat().st_mode & 0o077:
+        os.chmod(parent, 0o700)
+    tmp = path.with_name(path.name + PVEOSI_TMP_SUFFIX)
+    if tmp.exists():
+        if tmp.is_symlink():
+            raise NetplanSafetyError("Stale temporary file is a symlink; refusing.")
+        tmp.unlink()
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        os.write(fd, data)
+    finally:
+        os.close(fd)
+    os.chmod(tmp, 0o600)
+    os.replace(tmp, path)
+    os.chmod(path, 0o600)
+
+
+def _cleanup_stale_tmp() -> None:
+    for p in netplan_dir().glob(f"*{PVEOSI_TMP_SUFFIX}"):
+        if p.is_file() and not p.is_symlink():
+            p.unlink()
+
+
+def migration_state() -> str:
+    """Return: needs_migration | already_migrated | user_managed_dest | inconsistent."""
+    dest = netplan_dir() / DEST_NAME
+    if dest.exists():
+        _safe_path_in_netplan(dest)
+    prov = read_provenance()
+    files = list_netplan_files() if netplan_dir().is_dir() else []
+    names = {p.name for p in files}
+    has_dest = dest.is_file() and not dest.is_symlink()
+    has_source_candidate = any(
+        CLOUD_INIT_NAME_RE.search(n) for n in names if n != DEST_NAME
+    ) or any(
+        n != DEST_NAME and "cloud-init" in (netplan_dir() / n).read_text(encoding="utf-8").lower()[:200]
+        for n in names
+        if (netplan_dir() / n).is_file()
+    )
+
+    if prov:
+        retired = backup_dir() / str(prov.get("retired_name", ""))
+        expected_hash = str(prov.get("dest_sha256", ""))
+        if not has_dest:
+            return "inconsistent"
+        if _sha256_file(dest) != expected_hash:
+            return "inconsistent"
+        if prov.get("dest_name") != DEST_NAME:
+            return "inconsistent"
+        if has_source_candidate:
+            return "inconsistent"
+        if not retired.is_file():
+            return "inconsistent"
+        return "already_migrated"
+
+    if has_dest:
+        return "user_managed_dest"
+    if has_source_candidate or any(n != DEST_NAME for n in names):
+        try:
+            _identify_cloud_init_source(files)
+            return "needs_migration"
+        except NetplanSafetyError:
+            return "inconsistent"
+    return "needs_migration"
+
+
+def build_netplan_plan() -> NetplanPlan:
+    if yaml is None:
+        raise NetplanSafetyError("python3-yaml is required before netplan changes.")
+    state = migration_state()
+    dest = netplan_dir() / DEST_NAME
+    if state == "already_migrated":
+        prov = read_provenance() or {}
+        return NetplanPlan(
+            inspect=None,
+            action="already_migrated",
+            source_bytes=dest.read_bytes(),
+        )
+    if state == "user_managed_dest":
+        raise NetplanSafetyError(
+            f"{DEST_NAME} exists without pveosi migration provenance; treat as user-managed."
+        )
+    if state == "inconsistent":
+        raise NetplanSafetyError(
+            "Netplan migration state is inconsistent; inspect backups and /etc/netplan manually."
+        )
+    info = inspect_netplan()
+    source_bytes = info.source_path.read_bytes()
+    if dest.exists():
+        raise NetplanSafetyError(f"Refusing to overwrite existing {DEST_NAME}.")
+    return NetplanPlan(info, "create_copy", source_bytes)
 
 
 def netplan_get_effective() -> str:
@@ -195,39 +319,24 @@ def netplan_generate_validate() -> None:
         return
     r = subprocess.run(["netplan", "generate"], capture_output=True, text=True, check=False)
     if r.returncode != 0:
-        raise NetplanSafetyError(
-            f"netplan generate failed: {(r.stderr or r.stdout).strip() or 'unknown error'}"
-        )
+        raise NetplanSafetyError("netplan generate failed.")
 
 
 def _hash_text(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
-def build_netplan_plan() -> NetplanPlan:
-    info = inspect_netplan()
-    dest = info.dest_path
-    source = info.source_path
-    source_bytes = source.read_bytes()
-    if dest.exists():
-        if dest.read_bytes() == source_bytes:
-            return NetplanPlan(info, "already_independent", source_bytes)
-        raise NetplanSafetyError(
-            f"Destination {DEST_NAME} already exists with different content; refusing to overwrite."
-        )
-    return NetplanPlan(info, "create_copy", source_bytes)
+def _normalize_effective(text: str) -> str:
+    lines = [ln.rstrip() for ln in text.splitlines() if ln.strip()]
+    return "\n".join(lines)
 
 
 def migrate_netplan_independence(dry_run: bool = False) -> dict[str, str]:
-    """Copy cloud-init netplan to DEST_NAME and retire source from netplan dir (with rollback)."""
     plan = build_netplan_plan()
-    if plan.action == "already_independent":
-        return {
-            "status": "already_independent",
-            "dest": DEST_NAME,
-            "source": plan.inspect.source_name,
-        }
+    if plan.action == "already_migrated":
+        return {"status": "already_migrated", "dest": DEST_NAME}
     if dry_run:
+        assert plan.inspect
         return {
             "status": "would_migrate",
             "source": plan.inspect.source_name,
@@ -235,31 +344,41 @@ def migrate_netplan_independence(dry_run: bool = False) -> dict[str, str]:
             "bytes": str(len(plan.source_bytes)),
         }
 
+    _cleanup_stale_tmp()
+    assert plan.inspect
+    info = plan.inspect
+    source = info.source_path
+    dest = info.dest_path
     before = netplan_get_effective()
     bdir = backup_dir()
     bdir.mkdir(parents=True, exist_ok=True)
     os.chmod(bdir, 0o700)
 
-    source = plan.inspect.source_path
-    dest = plan.inspect.dest_path
-    stamp = source.name
-    backup_copy = bdir / stamp
+    backup_copy = bdir / source.name
     if not backup_copy.exists():
         shutil.copy2(source, backup_copy)
+        os.chmod(backup_copy, 0o600)
 
-    tmp_dest = dest.with_suffix(".yaml.tmp")
-    _safe_path_in_netplan(tmp_dest)
-    tmp_dest.write_bytes(plan.source_bytes)
-    os.replace(tmp_dest, dest)
-
+    _atomic_write_private(dest, plan.source_bytes)
     retired = bdir / f"{source.name}.retired"
     shutil.move(str(source), str(retired))
+    os.chmod(retired, 0o600)
 
     try:
         netplan_generate_validate()
         after = netplan_get_effective()
         if _hash_text(_normalize_effective(before)) != _hash_text(_normalize_effective(after)):
             raise NetplanSafetyError("Effective netplan configuration changed after migration.")
+        prov = {
+            "version": 1,
+            "source_name": source.name,
+            "source_sha256": _sha256_bytes(plan.source_bytes),
+            "dest_name": DEST_NAME,
+            "dest_sha256": _sha256_bytes(plan.source_bytes),
+            "retired_name": retired.name,
+            "migrated_at": int(time.time()),
+        }
+        _write_provenance(prov)
     except NetplanSafetyError:
         if dest.exists():
             dest.unlink()
@@ -269,44 +388,42 @@ def migrate_netplan_independence(dry_run: bool = False) -> dict[str, str]:
 
     return {
         "status": "migrated",
-        "source": plan.inspect.source_name,
+        "source": info.source_name,
         "dest": DEST_NAME,
         "effective_hash": _hash_text(_normalize_effective(after)),
     }
 
 
-def _normalize_effective(text: str) -> str:
-    lines = [ln.rstrip() for ln in text.splitlines() if ln.strip()]
-    return "\n".join(lines)
+def independent_netplan_verified() -> bool:
+    try:
+        return migration_state() == "already_migrated"
+    except NetplanSafetyError:
+        return False
 
 
 def network_diagnostics_readonly(backend: str) -> str:
     lines = [f"Network backend: {backend}", "Read-only diagnostics (no changes applied):"]
     if backend == "netplan":
         try:
-            info = inspect_netplan()
-            lines.append(f"  netplan files: {', '.join(info.all_files)}")
-            lines.append(f"  cloud-init source: {info.source_name}")
-            lines.append(f"  independence dest: {DEST_NAME} ({'present' if info.dest_path.exists() else 'absent'})")
+            ms = migration_state()
+            lines.append(f"  migration state: {ms}")
+            info = inspect_netplan() if ms == "needs_migration" else None
+            if info:
+                lines.append(f"  cloud-init source: {info.source_name}")
+            lines.append(
+                f"  {DEST_NAME}: {'present' if (netplan_dir() / DEST_NAME).exists() else 'absent'}"
+            )
         except NetplanSafetyError as exc:
             lines.append(f"  netplan inspect: {exc}")
-        try:
-            eff = netplan_get_effective()
-            lines.append("  netplan get: (output below)")
-            lines.append(eff.rstrip())
-        except NetplanSafetyError as exc:
-            lines.append(f"  netplan get: {exc}")
     elif backend == "ifupdown":
         iface = _root() / "etc/network/interfaces"
-        if iface.is_file():
-            lines.append(iface.read_text(encoding="utf-8")[:4000])
-        else:
-            lines.append("  /etc/network/interfaces not found.")
+        lines.append(iface.read_text(encoding="utf-8")[:4000] if iface.is_file() else "  missing")
     elif backend == "systemd-networkd":
         nd = _root() / "etc/systemd/network"
         for p in sorted(nd.glob("*.network"))[:20]:
             lines.append(f"--- {p.name} ---")
             lines.append(p.read_text(encoding="utf-8")[:2000])
-    else:
-        lines.append("  No automated diagnostics for this backend.")
+    lines.append(
+        "  Note: ifupdown/systemd-networkd guests require manual network verification."
+    )
     return "\n".join(lines)

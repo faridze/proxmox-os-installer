@@ -36,7 +36,9 @@ class PrepareVerifyTests(unittest.TestCase):
         (self.root / "var/lib/cloud/instance/sem").mkdir(parents=True)
         (self.root / "var/lib/cloud/instance/sem/config_scripts_user").write_text("", encoding="utf-8")
         (self.root / "proc/sys/kernel/random").mkdir(parents=True)
-        (self.root / "proc/sys/kernel/random/boot_id").write_text("boot-aaa\n", encoding="utf-8")
+        (self.root / "proc/sys/kernel/random/boot_id").write_text(
+            "aaaaaaaa-bbbb-cccc-dddd-000000000001\n", encoding="utf-8"
+        )
         (self.root / "etc/os-release").write_text(
             'ID=debian\nVERSION_ID="13"\nPRETTY_NAME="Debian 13"\n', encoding="utf-8"
         )
@@ -45,8 +47,12 @@ class PrepareVerifyTests(unittest.TestCase):
         eff = self.root / "eff.txt"
         eff.write_text("stable", encoding="utf-8")
         os.environ["PVEOSI_GUEST_MOCK_NETPLAN_GET"] = f"file:{eff}"
-        os.environ["PVEOSI_GUEST_MOCK_IP4"] = "inet 10.0.0.2/24"
-        os.environ["PVEOSI_GUEST_MOCK_ROUTE"] = "default via 10.0.0.1"
+        os.environ["PVEOSI_GUEST_MOCK_IPJ_ADDR"] = (
+            '[{"ifname":"eth0","addr_info":[{"family":"inet","local":"10.0.0.2","prefixlen":24,"dynamic":true}],'
+            '"flags":["UP"]}]'
+        )
+        os.environ["PVEOSI_GUEST_MOCK_IPJ_ROUTE"] = '[{"dst":"default","gateway":"10.0.0.1","dev":"eth0"}]'
+        (self.root / "etc/resolv.conf").write_text("nameserver 10.0.0.1\n", encoding="utf-8")
         (self.root / "etc/hostname").write_text("lab\n", encoding="utf-8")
 
     def tearDown(self):
@@ -61,7 +67,7 @@ class PrepareVerifyTests(unittest.TestCase):
         self.assertTrue((self.root / "etc/cloud/cloud-init.disabled").exists())
         st = json.loads((self.root / "var/lib/pveosi-guest-setup/state.json").read_text())
         self.assertEqual(st["phase"], "prepared")
-        self.assertEqual(st["prepare_boot_id"], "boot-aaa")
+        self.assertEqual(st["prepare_boot_id"], "aaaaaaaa-bbbb-cccc-dddd-000000000001")
 
     def test_dry_run_prepare_no_state(self):
         guest.cmd_prepare(dry_run=True)
@@ -71,12 +77,13 @@ class PrepareVerifyTests(unittest.TestCase):
     def test_verify_requires_reboot(self):
         guest.cmd_prepare(dry_run=False)
         with self.assertRaises(guest.GuestSetupError):
-            guest.cmd_verify(interactive=False)
+            guest.cmd_verify(interactive=True)
 
     def test_verify_success_with_attestation(self):
         guest.cmd_prepare(dry_run=False)
-        (self.root / "proc/sys/kernel/random/boot_id").write_text("boot-bbb\n", encoding="utf-8")
-        os.environ["PVEOSI_GUEST_MOCK_IP4"] = "inet 10.0.0.2/24"
+        (self.root / "proc/sys/kernel/random/boot_id").write_text(
+            "bbbbbbbb-bbbb-cccc-dddd-000000000002\n", encoding="utf-8"
+        )
         with mock.patch("builtins.input", return_value="yes"):
             guest.cmd_verify(interactive=True)
         st = json.loads((self.root / "var/lib/pveosi-guest-setup/state.json").read_text())

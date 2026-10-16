@@ -22,9 +22,10 @@ if [[ "${PVEOSI_SKIP_FILE_COPY:-0}" != 1 ]]; then
   install -d -m 0755 "$TARGET/lib/pveosi-guest"
   install -m 0644 "$REPO/lib/guest_setup_engine.py" "$TARGET/lib/pveosi-guest/guest_setup_engine.py"
   install -m 0644 "$REPO/lib/guest_netplan.py" "$TARGET/lib/pveosi-guest/guest_netplan.py"
+  install -m 0644 "$REPO/lib/guest_network.py" "$TARGET/lib/pveosi-guest/guest_network.py"
   install -m 0755 "$REPO/bin/pveosi-guest-setup" "$TARGET/bin/pveosi-guest-setup"
   install -m 0644 "$REPO/catalog/os-images.tsv" "$TARGET/catalog/os-images.tsv"
-  for py in image_catalog.py preflight.py cache_ops.py ssh_access.py update_engine.py finalize_engine.py console_engine.py snippet_cleanup.py guest_setup_engine.py guest_netplan.py; do
+  for py in image_catalog.py preflight.py cache_ops.py ssh_access.py update_engine.py finalize_engine.py console_engine.py snippet_cleanup.py guest_setup_engine.py guest_netplan.py guest_network.py; do
     install -m 0644 "$REPO/lib/$py" "$TARGET/lib/$py"
   done
   for sh in common.sh interactive.sh install_aliases.sh snippets_guidance.sh; do

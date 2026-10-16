@@ -48,6 +48,7 @@ REQUIRED_SOURCE = (
     "lib/snippet_cleanup.py",
     "lib/guest_setup_engine.py",
     "lib/guest_netplan.py",
+    "lib/guest_network.py",
     "bin/pveosi-guest-setup",
     "lib/common.sh",
     "lib/interactive.sh",
@@ -69,6 +70,7 @@ REQUIRED_INSTALLED = (
     "lib/snippet_cleanup.py",
     "lib/guest_setup_engine.py",
     "lib/guest_netplan.py",
+    "lib/guest_network.py",
     "bin/pveosi-guest-setup",
     "lib/common.sh",
     "lib/interactive.sh",
@@ -87,6 +89,7 @@ PY_LIBS = (
     "snippet_cleanup.py",
     "guest_setup_engine.py",
     "guest_netplan.py",
+    "guest_network.py",
 )
 SH_LIBS = ("common.sh", "interactive.sh", "install_aliases.sh", "snippets_guidance.sh")
 

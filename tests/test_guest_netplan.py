@@ -108,13 +108,15 @@ class GuestNetplanTests(unittest.TestCase):
         with self.assertRaises(guest_netplan.NetplanSafetyError):
             guest_netplan.build_netplan_plan()
 
-    def test_already_independent_idempotent(self):
+    def test_already_migrated_idempotent_after_retirement(self):
         src = self.root / "etc/netplan/50-cloud-init.yaml"
         src.write_text(STATIC_DEBIAN, encoding="utf-8")
-        dest = self.root / "etc/netplan/90-pveosi-static.yaml"
-        dest.write_text(STATIC_DEBIAN, encoding="utf-8")
+        self._effective_file("eth0: {addresses: [10.0.0.5/24]}")
+        guest_netplan.migrate_netplan_independence(dry_run=False)
         plan = guest_netplan.build_netplan_plan()
-        self.assertEqual(plan.action, "already_independent")
+        self.assertEqual(plan.action, "already_migrated")
+        again = guest_netplan.migrate_netplan_independence(dry_run=False)
+        self.assertEqual(again["status"], "already_migrated")
 
     def test_symlink_refused(self):
         real = self.root / "etc/netplan/50-cloud-init.yaml"

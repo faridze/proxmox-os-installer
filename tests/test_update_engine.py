@@ -34,6 +34,7 @@ def _make_package(root: Path, version: str = "9.9.9-test") -> None:
     guest_lib.mkdir(exist_ok=True)
     shutil_copy(BASE / "lib/guest_setup_engine.py", guest_lib / "guest_setup_engine.py")
     shutil_copy(BASE / "lib/guest_netplan.py", guest_lib / "guest_netplan.py")
+    shutil_copy(BASE / "lib/guest_network.py", guest_lib / "guest_network.py")
     for name in (
         "image_catalog.py",
         "preflight.py",
@@ -45,6 +46,7 @@ def _make_package(root: Path, version: str = "9.9.9-test") -> None:
         "snippet_cleanup.py",
         "guest_setup_engine.py",
         "guest_netplan.py",
+        "guest_network.py",
         "common.sh",
         "interactive.sh",
         "install_aliases.sh",
