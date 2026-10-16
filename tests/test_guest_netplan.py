@@ -82,7 +82,7 @@ class GuestNetplanTests(unittest.TestCase):
         self.assertEqual(result["status"], "migrated")
         dest = self.root / "etc/netplan/90-pveosi-static.yaml"
         self.assertTrue(dest.is_file())
-        self.assertEqual(dest.read_bytes(), src.read_bytes())
+        self.assertEqual(dest.read_bytes(), STATIC_DEBIAN.encode("utf-8"))
         self.assertFalse(src.exists())
 
     def test_dhcp_different_iface(self):

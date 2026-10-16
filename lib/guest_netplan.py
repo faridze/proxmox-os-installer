@@ -125,6 +125,8 @@ def list_netplan_files() -> list[Path]:
 def _identify_cloud_init_source(files: list[Path]) -> Path:
     matches: list[Path] = []
     for p in files:
+        if p.name == DEST_NAME:
+            continue
         if CLOUD_INIT_NAME_RE.search(p.name):
             matches.append(p)
             continue

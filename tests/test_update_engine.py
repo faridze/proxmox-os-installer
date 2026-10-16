@@ -27,10 +27,13 @@ def _make_package(root: Path, version: str = "9.9.9-test") -> None:
     (root / "bin").mkdir(exist_ok=True)
     shutil_copy(BASE / "bin/proxmox-os-installer", root / "bin/proxmox-os-installer")
     shutil_copy(BASE / "bin/pveosi-guest-setup", root / "bin/pveosi-guest-setup")
-    (root / "lib/pveosi-guest").mkdir(exist_ok=True)
-    shutil_copy(BASE / "lib/guest_setup_engine.py", root / "lib/pveosi-guest/guest_setup_engine.py")
+    shutil_copy(BASE / "lib/guest_setup_engine.py", guest_lib / "guest_setup_engine.py")
     shutil_copy(BASE / "lib/guest_netplan.py", root / "lib/pveosi-guest/guest_netplan.py")
     (root / "lib").mkdir(exist_ok=True)
+    guest_lib = root / "lib/pveosi-guest"
+    if guest_lib.exists() and not guest_lib.is_dir():
+        guest_lib.unlink()
+    guest_lib.mkdir(exist_ok=True)
     for name in (
         "image_catalog.py",
         "preflight.py",
