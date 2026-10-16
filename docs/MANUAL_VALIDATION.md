@@ -52,7 +52,7 @@ Do not delete the attached `snippets` file: the VM needs it for subsequent start
 
 ### Phase B — optional Cloud-Init finalization
 
-1. Inside the guest: create `/etc/cloud/cloud-init.disabled`, reboot, verify network + SSH, shut down cleanly.
+1. Inside the guest: run `pveosi-guest-setup --guided` (or create `/etc/cloud/cloud-init.disabled` manually), reboot, verify network + SSH, shut down cleanly.
 2. On the host (VM stopped): `pveosi finalize <VMID> --dry-run` and review the preview.
 3. Run `pveosi finalize <VMID>`; attest guest preparation; approve host-side `qm set --delete` operations only (snippet files are **manual delete** after verifying no cluster VM references them).
 4. Start the VM; verify networking, SSH, current password, and filesystems.
