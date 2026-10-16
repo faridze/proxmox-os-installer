@@ -143,7 +143,7 @@ def _identify_cloud_init_source(files: list[Path]) -> Path:
         )
     other_eth_files = []
     for p in files:
-        if p == matches[0]:
+        if p == matches[0] or p.name == DEST_NAME:
             continue
         doc = _load_yaml(p.read_text(encoding="utf-8"), p.name)
         net = _network_block(doc)
